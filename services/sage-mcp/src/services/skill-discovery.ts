@@ -181,7 +181,7 @@ export class SkillDiscoveryRuntime {
        ${where}
        ORDER BY source_type ASC, display_name ASC, id ASC`,
     );
-    return rows.map((row) => mapSourceRow(row));
+    return rows.map((row: PoolRow) => mapSourceRow(row));
   }
 
   async upsertSource(input: SourceUpsertInput): Promise<SkillSourceRecord> {
@@ -274,7 +274,7 @@ export class SkillDiscoveryRuntime {
                  ORDER BY src.display_name ASC, s.canonical_name ASC`;
 
     const { rows } = await this.pool.query(sql, values);
-    return rows.map((row) => mapSkillRow(row as PoolRow));
+    return rows.map((row: PoolRow) => mapSkillRow(row));
   }
 
   async patchSkill(skillID: string, patch: SkillStatePatch): Promise<CanonicalSkillRecord> {
@@ -333,7 +333,7 @@ export class SkillDiscoveryRuntime {
        LIMIT $2`,
       args,
     );
-    return rows.map((row) => mapSkillRow(row as PoolRow));
+    return rows.map((row: PoolRow) => mapSkillRow(row));
   }
 
   async syncAllSources(): Promise<{ synced: number; failed: number }> {
@@ -967,4 +967,3 @@ export async function getSkillDiscoveryRuntime(): Promise<SkillDiscoveryRuntime>
   await singleton.init();
   return singleton;
 }
-

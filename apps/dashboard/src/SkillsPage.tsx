@@ -87,6 +87,9 @@ export default function SkillsPage() {
 
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const [sourceDraft, setSourceDraft] = useState<SourceDraft>(defaultSourceDraft);
+  const [workspaceLocalExpanded, setWorkspaceLocalExpanded] = useState(true);
+  const [indexedLocalExpanded, setIndexedLocalExpanded] = useState(true);
+  const [expandedSourceIds, setExpandedSourceIds] = useState<Record<string, boolean>>({});
 
   const loadLocalSkills = useCallback(async () => {
     const catalog = await getSkillCatalog();
@@ -99,7 +102,7 @@ export default function SkillsPage() {
       getDiscoveredSkillSources(),
       getDiscoveredSkills(),
     ]);
-    setSources(nextSources.filter((source) => source.sourceType !== "local"));
+    setSources(nextSources);
     setDiscoveredSkills(nextSkills);
   }, []);
 
@@ -114,6 +117,31 @@ export default function SkillsPage() {
   }, [reloadAll]);
 
   const grouped = useMemo(() => bySource(discoveredSkills), [discoveredSkills]);
+  const localSource = useMemo(
+    () => sources.find((source) => source.sourceType === "local") ?? null,
+    [sources],
+  );
+  const serverSources = useMemo(
+    () => sources.filter((source) => source.sourceType !== "local"),
+    [sources],
+  );
+  const localDiscoveredSkills = useMemo(
+    () => (localSource ? grouped.get(localSource.id) ?? [] : []),
+    [grouped, localSource],
+  );
+
+  useEffect(() => {
+    setExpandedSourceIds((prev) => {
+      let changed = false;
+      const next: Record<string, boolean> = { ...prev };
+      for (const source of serverSources) {
+        if (typeof next[source.id] === "boolean") continue;
+        next[source.id] = true;
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [serverSources]);
 
   const onCreateLocalSkill = useCallback(() => {
     setLocalDraft(defaultLocalSkillDraft);
@@ -301,6 +329,56 @@ export default function SkillsPage() {
       .finally(() => setBusy(false));
   }, [loadDiscovered]);
 
+  const toggleSourceExpanded = useCallback((sourceId: string) => {
+    setExpandedSourceIds((prev) => ({
+      ...prev,
+      [sourceId]: !(prev[sourceId] ?? true),
+    }));
+  }, []);
+
+  const renderDiscoveredSkillTable = useCallback((skills: DiscoveredSkillItem[]) => {
+    if (skills.length === 0) {
+      return <div className="settings-empty-tools">No discovered skills yet for this source.</div>;
+    }
+    return (
+      <table className="settings-tools-table">
+        <thead>
+          <tr>
+            <th>Skill</th>
+            <th>State</th>
+            <th>Risk</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {skills.map((skill) => (
+            <tr key={skill.id}>
+              <td>
+                <div className="settings-tool-name">{skill.canonicalName}</div>
+                <div className="settings-tool-id">{skill.originalToolName}</div>
+                <div className="settings-tool-command">{skill.description}</div>
+              </td>
+              <td>{skill.skillState}</td>
+              <td>{skill.riskLevel}</td>
+              <td className="settings-tool-actions">
+                <button
+                  className="settings-btn"
+                  onClick={() => onReleaseSkill(skill)}
+                  disabled={busy || skill.skillState === "released"}
+                >
+                  Release
+                </button>
+                <button className="settings-btn" onClick={() => onDisableSkill(skill)} disabled={busy}>
+                  {skill.skillState === "disabled" ? "Enable" : "Disable"}
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }, [busy, onDisableSkill, onReleaseSkill]);
+
   return (
     <main className="settings-page">
       <section className="settings-card settings-tools-card">
@@ -320,44 +398,83 @@ export default function SkillsPage() {
         <div className="settings-subsection">
           <div className="settings-subhead">
             <h2>Local Skills</h2>
-            <p>Create, enable/disable, and delete local workspace skills.</p>
+            <p>Create local skills and inspect indexed local capabilities.</p>
           </div>
-          <div className="settings-tools-table-wrap">
-            {localSkills.length === 0 ? (
-              <div className="settings-empty-tools">No local skills found yet.</div>
-            ) : (
-              <table className="settings-tools-table">
-                <thead>
-                  <tr>
-                    <th>Skill</th>
-                    <th>Source</th>
-                    <th>State</th>
-                    <th>Updated</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {localSkills.map((skill) => (
-                    <tr key={skill.id}>
-                      <td>
-                        <div className="settings-tool-name">{skill.name}</div>
-                        <div className="settings-tool-id">{skill.id}</div>
-                      </td>
-                      <td>{skill.source}</td>
-                      <td>{skill.enabled ? "enabled" : "disabled"}</td>
-                      <td className="settings-tool-command">{new Date(skill.updatedAt).toLocaleString()}</td>
-                      <td className="settings-tool-actions">
-                        <button className="settings-btn" onClick={() => onToggleLocalSkill(skill)} disabled={busy}>
-                          {skill.enabled ? "Disable" : "Enable"}
-                        </button>
-                        <button className="settings-btn danger" onClick={() => onDeleteLocalSkill(skill.id)} disabled={busy}>
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <div className="skills-source-list">
+            <div className="skills-source-card">
+              <div className="skills-source-head">
+                <div>
+                  <div className="settings-tool-name">Workspace Local Skills</div>
+                  <div className="settings-tool-command">Create, enable/disable, and delete local workspace skills.</div>
+                </div>
+                <div className="settings-tool-actions">
+                  <button className="settings-btn" onClick={() => setWorkspaceLocalExpanded((prev) => !prev)} disabled={busy}>
+                    {workspaceLocalExpanded ? "Collapse" : "Expand"}
+                  </button>
+                </div>
+              </div>
+              {workspaceLocalExpanded && (
+                <div className="settings-tools-table-wrap">
+                  {localSkills.length === 0 ? (
+                    <div className="settings-empty-tools">No local skills found yet.</div>
+                  ) : (
+                    <table className="settings-tools-table">
+                      <thead>
+                        <tr>
+                          <th>Skill</th>
+                          <th>Source</th>
+                          <th>State</th>
+                          <th>Updated</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {localSkills.map((skill) => (
+                          <tr key={skill.id}>
+                            <td>
+                              <div className="settings-tool-name">{skill.name}</div>
+                              <div className="settings-tool-id">{skill.id}</div>
+                            </td>
+                            <td>{skill.source}</td>
+                            <td>{skill.enabled ? "enabled" : "disabled"}</td>
+                            <td className="settings-tool-command">{new Date(skill.updatedAt).toLocaleString()}</td>
+                            <td className="settings-tool-actions">
+                              <button className="settings-btn" onClick={() => onToggleLocalSkill(skill)} disabled={busy}>
+                                {skill.enabled ? "Disable" : "Enable"}
+                              </button>
+                              <button className="settings-btn danger" onClick={() => onDeleteLocalSkill(skill.id)} disabled={busy}>
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {localSource && (
+              <div className="skills-source-card">
+                <div className="skills-source-head">
+                  <div>
+                    <div className="settings-tool-name">Indexed Local Skills</div>
+                    <div className="settings-tool-id">{localSource.id} | {localSource.endpoint}</div>
+                    <div className="settings-tool-command">
+                      trust: {localSource.trust} | {localSource.enabled ? "enabled" : "disabled"}
+                      {localSource.lastSyncStatus ? ` | sync: ${localSource.lastSyncStatus}` : ""}
+                    </div>
+                  </div>
+                  <div className="settings-tool-actions">
+                    <button className="settings-btn" onClick={() => onSyncSource(localSource)} disabled={busy}>Sync</button>
+                    <button className="settings-btn" onClick={() => setIndexedLocalExpanded((prev) => !prev)} disabled={busy}>
+                      {indexedLocalExpanded ? "Collapse" : "Expand"}
+                    </button>
+                  </div>
+                </div>
+                {indexedLocalExpanded && renderDiscoveredSkillTable(localDiscoveredSkills)}
+              </div>
             )}
           </div>
         </div>
@@ -367,22 +484,23 @@ export default function SkillsPage() {
             <h2>Discovered Server Skills</h2>
             <p>Release quarantined skills by server or one-by-one. Disable servers and individual skills.</p>
           </div>
-          {sources.length === 0 ? (
+          {serverSources.length === 0 ? (
             <div className="settings-empty-tools">No discovery sources configured.</div>
           ) : (
             <div className="skills-source-list">
-              {sources.map((source) => {
+              {serverSources.map((source) => {
                 const sourceSkills = grouped.get(source.id) ?? [];
                 const quarantined = sourceSkills.filter((skill) => skill.skillState === "quarantined").length;
+                const expanded = expandedSourceIds[source.id] ?? true;
                 return (
                   <div className="skills-source-card" key={source.id}>
                     <div className="skills-source-head">
                       <div>
                         <div className="settings-tool-name">{source.displayName}</div>
-                        <div className="settings-tool-id">{source.id} · {source.endpoint}</div>
+                        <div className="settings-tool-id">{source.id} | {source.endpoint}</div>
                         <div className="settings-tool-command">
-                          trust: {source.trust} · {source.enabled ? "enabled" : "disabled"}
-                          {source.lastSyncStatus ? ` · sync: ${source.lastSyncStatus}` : ""}
+                          trust: {source.trust} | {source.enabled ? "enabled" : "disabled"}
+                          {source.lastSyncStatus ? ` | sync: ${source.lastSyncStatus}` : ""}
                         </div>
                       </div>
                       <div className="settings-tool-actions">
@@ -393,47 +511,12 @@ export default function SkillsPage() {
                         <button className="settings-btn" onClick={() => onToggleSource(source)} disabled={busy}>
                           {source.enabled ? "Disable Server" : "Enable Server"}
                         </button>
+                        <button className="settings-btn" onClick={() => toggleSourceExpanded(source.id)} disabled={busy}>
+                          {expanded ? "Collapse" : "Expand"}
+                        </button>
                       </div>
                     </div>
-                    {sourceSkills.length === 0 ? (
-                      <div className="settings-empty-tools">No discovered skills yet for this source.</div>
-                    ) : (
-                      <table className="settings-tools-table">
-                        <thead>
-                          <tr>
-                            <th>Skill</th>
-                            <th>State</th>
-                            <th>Risk</th>
-                            <th>Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {sourceSkills.map((skill) => (
-                            <tr key={skill.id}>
-                              <td>
-                                <div className="settings-tool-name">{skill.canonicalName}</div>
-                                <div className="settings-tool-id">{skill.originalToolName}</div>
-                                <div className="settings-tool-command">{skill.description}</div>
-                              </td>
-                              <td>{skill.skillState}</td>
-                              <td>{skill.riskLevel}</td>
-                              <td className="settings-tool-actions">
-                                <button
-                                  className="settings-btn"
-                                  onClick={() => onReleaseSkill(skill)}
-                                  disabled={busy || skill.skillState === "released"}
-                                >
-                                  Release
-                                </button>
-                                <button className="settings-btn" onClick={() => onDisableSkill(skill)} disabled={busy}>
-                                  {skill.skillState === "disabled" ? "Enable" : "Disable"}
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
+                    {expanded && renderDiscoveredSkillTable(sourceSkills)}
                   </div>
                 );
               })}
@@ -612,4 +695,3 @@ export default function SkillsPage() {
     </main>
   );
 }
-

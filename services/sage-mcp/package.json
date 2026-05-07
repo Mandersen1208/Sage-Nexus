@@ -5,6 +5,7 @@
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
+    "check:no-explicit-any": "node scripts/no-explicit-any.mjs",
     "build": "node build.mjs",
     "test": "tsx tests/runtime-inventory.test.ts && tsx tests/skills.test.ts && tsx tests/agent-context.test.ts && tsx tests/agent-call.test.ts && tsx tests/office.test.ts",
     "start": "npx tsx src/index.ts",
@@ -23,6 +24,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.5.2",
+    "@types/pg": "^8.20.0",
     "typescript": "^6.0.2"
   }
 }

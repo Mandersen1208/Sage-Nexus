@@ -212,7 +212,7 @@ func (r *skillDiscoveryRuntime) syncDaily() error {
 }
 
 func (r *skillDiscoveryRuntime) listSources(ctx context.Context) ([]skillDiscoverySource, error) {
-	status, body, err := r.getJSON("/skills/discovery/servers")
+	status, body, err := r.getJSON("/skills/discovery/servers?includeLocal=true")
 	if err != nil {
 		return nil, err
 	}
@@ -342,6 +342,7 @@ func (r *skillDiscoveryRuntime) syncAll() (map[string]interface{}, error) {
 
 func (r *skillDiscoveryRuntime) listSkills(filters map[string]string) ([]skillDiscoverySkill, error) {
 	query := url.Values{}
+	query.Set("includeLocal", "true")
 	for k, v := range filters {
 		v = strings.TrimSpace(v)
 		if v != "" {

@@ -6,7 +6,8 @@ COPY package*.json tsconfig.json ./
 RUN npm install && npm install --save-dev typescript @types/node
 
 COPY src/ ./src/
-RUN ./node_modules/.bin/tsc
+COPY scripts/ ./scripts/
+RUN node ./scripts/no-explicit-any.mjs && ./node_modules/.bin/tsc
 
 # ── Runtime ────────────────────────────────────────────────────────────────────
 FROM node:22-alpine
