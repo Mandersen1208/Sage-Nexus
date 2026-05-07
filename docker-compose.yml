@@ -1,0 +1,145 @@
+name: sage-nexus
+
+services:
+  skills-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: sage
+      POSTGRES_USER: sage
+      POSTGRES_PASSWORD: sage
+    ports:
+      - "5432:5432"
+    volumes:
+      - skills-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sage -d sage"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  acp-server:
+    build:
+      context: ./services/acp-server
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - acp-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/acp/v1/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  sage-mcp:
+    build:
+      context: ./services/sage-mcp
+      dockerfile: Dockerfile
+    environment:
+      TRANSPORT: http
+      PORT: 3030
+      MANAGER_URL: http://manager:8090
+      SKILL_DB_HOST: skills-db
+      SKILL_DB_PORT: 5432
+      SKILL_DB_NAME: sage
+      SKILL_DB_USER: sage
+      SKILL_DB_PASSWORD: sage
+      SKILL_EMBEDDING_DIM: 64
+      SKILL_RETRIEVAL_TOP_K: 5
+      SAGE_SOUL_PATH: ${SAGE_SOUL_PATH:-/home/node/.openclaw/workspace/SOUL.md}
+      SAGE_ARTIFACTS_DIR: /sage-state/workspace/artifacts
+      SAGE_AGENT_REGISTRY_FILE: /sage-state/workspace/sage/agents.registry.json
+      RUNTIME_REPO_ROOT: /workspace/sage-nexus
+      RUNTIME_CONFIG_FILE: /sage-state/sage.json
+      RUNTIME_INVENTORY_FILE: /sage-state/runtime-inventory.json
+    ports:
+      - "3030:3030"
+    volumes:
+      - sage-state:/sage-state
+      - sage-artifacts:/sage-state/workspace/artifacts
+      - .:/workspace/sage-nexus:ro
+      - ${SAGE_HOST_WORKSPACE:-C:/Users/matta/.openclaw/workspace}:/home/node/.openclaw/workspace:ro
+    depends_on:
+      skills-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3030/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  manager:
+    build:
+      context: ./services/manager
+      dockerfile: Dockerfile
+    entrypoint: ["/app/sage-manager"]
+    environment:
+      MANAGER_LISTEN_ADDR: ":8090"
+      ACP_ENDPOINT: http://acp-server:8080
+      MCP_ENDPOINT: http://sage-mcp:3030
+      REDIS_ADDR: redis:6379
+      AGENT_KEY_FILE: /data/agent.key
+      SAGE_STATE_DIR: /sage-state
+      SAGE_SOUL_PATH: ${SAGE_SOUL_PATH:-/home/node/.openclaw/workspace/SOUL.md}
+      SAGE_FILE_BROWSER_ROOT: /code
+      SAGE_AGENT_REGISTRY_FILE: /sage-state/workspace/sage/agents.registry.json
+      SAGE_FRONT_OF_HOUSE_ENABLED: ${SAGE_FRONT_OF_HOUSE_ENABLED:-true}
+      SAGE_REVOICE_POLICY: ${SAGE_REVOICE_POLICY:-selective}
+      SAGE_WORK_CONTEXT_ENABLED: ${SAGE_WORK_CONTEXT_ENABLED:-true}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      COPILOT_GITHUB_TOKEN: ${COPILOT_GITHUB_TOKEN:-}
+      GH_TOKEN: ${GH_TOKEN:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    ports:
+      - "8090:8090"
+    volumes:
+      - manager-data:/data
+      - sage-state:/sage-state
+      - sage-artifacts:/sage-state/workspace/artifacts
+      - ${SAGE_HOST_CODE_ROOT:-C:/Users/matta/code}:/code:ro
+      - ${SAGE_HOST_WORKSPACE:-C:/Users/matta/.openclaw/workspace}:/home/node/.openclaw/workspace:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      acp-server:
+        condition: service_healthy
+      sage-mcp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8090/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  dashboard:
+    build:
+      context: ./apps/dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "5174:80"
+    depends_on:
+      manager:
+        condition: service_healthy
+
+volumes:
+  skills-db-data:
+  acp-data:
+  manager-data:
+  redis-data:
+  sage-state:
+  sage-artifacts:

@@ -1,0 +1,5 @@
+manager
+manager.exe
+.gocache
+.gomodcache
+*.log

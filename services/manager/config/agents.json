@@ -1,0 +1,347 @@
+{
+  "version": 1,
+  "toolBundles": {
+    "budget": [
+      "budget_get_current_month",
+      "budget_get_month",
+      "budget_get_month_transactions",
+      "budget_get_spend_by_category",
+      "budget_get_transactions_by_category",
+      "budget_list_months"
+    ],
+    "context": [
+      "agent_context_append",
+      "agent_context_read",
+      "agent_context_search"
+    ],
+    "mesh": [
+      "call_agent",
+      "list_agents"
+    ],
+    "office": [
+      "office_artifact_list",
+      "office_docx_create",
+      "office_ics_create",
+      "office_xlsx_create"
+    ],
+    "runtime": [
+      "runtime_inventory_events",
+      "runtime_inventory_scan",
+      "runtime_inventory_search"
+    ],
+    "skills": [
+      "skill_get",
+      "skill_get_reference",
+      "skill_list",
+      "skill_search",
+      "skill_registry_get",
+      "skill_registry_search"
+    ],
+    "web": [
+      "searxng_search"
+    ]
+  },
+  "agents": {
+    "AGT-project-manager-agent": {
+      "id": "AGT-project-manager-agent",
+      "displayName": "Project Manager",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["solo", "launch"],
+      "routable": true,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/project-manager-agent.md",
+      "routeToolName": "call_project_manager_agent",
+      "routeDescription": "Route requirement gathering, acceptance criteria, coordination, project plans, and implementation work orders to the project manager.",
+      "toolBundles": ["skills", "web", "mesh", "context"],
+      "peerTargets": [
+        "AGT-architect-agent",
+        "AGT-backend-dev-agent",
+        "AGT-database-admin-agent",
+        "AGT-devops-agent",
+        "AGT-frontend-dev-agent",
+        "AGT-office-document-agent",
+        "AGT-qa-agent",
+        "AGT-research-agent",
+        "AGT-senior-dev-agent"
+      ],
+      "maxPeerDepth": 3,
+      "seniorGate": "off",
+      "authority": "Requirements, coordination, work orders, acceptance criteria, and task sequencing.",
+      "mustNotOwn": ["final engineering quality gate", "runtime inventory ownership"]
+    },
+    "AGT-senior-dev-agent": {
+      "id": "AGT-senior-dev-agent",
+      "displayName": "Senior Dev",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["solo", "launch"],
+      "routable": true,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/senior-dev-agent.md",
+      "routeToolName": "call_senior_dev_agent",
+      "routeDescription": "Route technical review, maintainability decisions, code quality judgment, delivery readiness, and read-only runtime provenance review to the senior dev.",
+      "toolBundles": ["skills", "web", "runtime", "mesh", "context"],
+      "peerTargets": [
+        "AGT-architect-agent",
+        "AGT-backend-dev-agent",
+        "AGT-database-admin-agent",
+        "AGT-devops-agent",
+        "AGT-frontend-dev-agent",
+        "AGT-office-document-agent",
+        "AGT-project-manager-agent",
+        "AGT-qa-agent",
+        "AGT-research-agent"
+      ],
+      "maxPeerDepth": 3,
+      "seniorGate": "off",
+      "authority": "Quality, maintainability, tests, technical risk, delivery readiness, and final engineering approval.",
+      "mustNotOwn": ["domain implementation planning by default", "project management"]
+    },
+    "AGT-frontend-dev-agent": {
+      "id": "AGT-frontend-dev-agent",
+      "displayName": "Frontend",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["solo", "launch"],
+      "routable": true,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/frontend-dev-agent.md",
+      "routeToolName": "call_frontend_dev_agent",
+      "routeDescription": "Route frontend implementation tasks including UI behavior, components, styling, responsive layout, interaction design, and accessibility.",
+      "toolBundles": ["skills", "mesh", "context"],
+      "peerTargets": [
+        "AGT-architect-agent",
+        "AGT-backend-dev-agent",
+        "AGT-qa-agent",
+        "AGT-research-agent"
+      ],
+      "maxPeerDepth": 3,
+      "seniorGate": "delivery",
+      "authority": "Frontend code, UI behavior, responsive layout, accessibility, and frontend implementation tradeoffs.",
+      "mustNotOwn": ["backend data contracts", "deployment"]
+    },
+    "AGT-backend-dev-agent": {
+      "id": "AGT-backend-dev-agent",
+      "displayName": "Backend",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["solo", "launch"],
+      "routable": true,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/backend-dev-agent.md",
+      "routeToolName": "call_backend_dev_agent",
+      "routeDescription": "Route backend implementation tasks including APIs, services, server logic, data models, and integration behavior.",
+      "toolBundles": ["skills", "mesh", "context"],
+      "peerTargets": [
+        "AGT-architect-agent",
+        "AGT-database-admin-agent",
+        "AGT-devops-agent",
+        "AGT-frontend-dev-agent",
+        "AGT-qa-agent",
+        "AGT-research-agent"
+      ],
+      "maxPeerDepth": 3,
+      "seniorGate": "delivery",
+      "authority": "Backend code, API behavior, service boundaries, server data flow, and integration implementation.",
+      "mustNotOwn": ["frontend layout", "infrastructure deployment"]
+    },
+    "AGT-devops-agent": {
+      "id": "AGT-devops-agent",
+      "displayName": "DevOps",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["solo", "launch"],
+      "routable": true,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/devops-agent.md",
+      "routeToolName": "call_devops_agent",
+      "routeDescription": "Route deployment, CI/CD, Docker, environment, networking, runtime operations, and infrastructure changes to DevOps.",
+      "toolBundles": ["skills", "mesh", "context"],
+      "peerTargets": [
+        "AGT-architect-agent",
+        "AGT-backend-dev-agent",
+        "AGT-database-admin-agent",
+        "AGT-qa-agent",
+        "AGT-research-agent"
+      ],
+      "maxPeerDepth": 3,
+      "seniorGate": "delivery",
+      "authority": "Deployment, Docker, CI/CD, runtime operations, network wiring, and infrastructure safety.",
+      "mustNotOwn": ["application feature logic", "UI design"]
+    },
+    "AGT-qa-agent": {
+      "id": "AGT-qa-agent",
+      "displayName": "QA",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["solo", "launch"],
+      "routable": true,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/qa-agent.md",
+      "routeToolName": "call_qa_agent",
+      "routeDescription": "Route test strategy, regression risk, validation planning, acceptance checks, and QA review to QA.",
+      "toolBundles": ["skills", "mesh", "context"],
+      "peerTargets": [
+        "AGT-architect-agent",
+        "AGT-backend-dev-agent",
+        "AGT-database-admin-agent",
+        "AGT-devops-agent",
+        "AGT-frontend-dev-agent",
+        "AGT-research-agent"
+      ],
+      "maxPeerDepth": 3,
+      "seniorGate": "delivery",
+      "authority": "Testing strategy, regression coverage, validation evidence, and release confidence.",
+      "mustNotOwn": ["implementation", "architecture ownership"]
+    },
+    "AGT-database-admin-agent": {
+      "id": "AGT-database-admin-agent",
+      "displayName": "DBA",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["solo", "launch"],
+      "routable": true,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/database-admin-agent.md",
+      "routeToolName": "call_database_admin_agent",
+      "routeDescription": "Route schema design, migrations, data modeling, query optimization, and database operational concerns to the DBA.",
+      "toolBundles": ["skills", "mesh", "context"],
+      "peerTargets": [
+        "AGT-architect-agent",
+        "AGT-backend-dev-agent",
+        "AGT-devops-agent",
+        "AGT-qa-agent",
+        "AGT-research-agent"
+      ],
+      "maxPeerDepth": 3,
+      "seniorGate": "delivery",
+      "authority": "Database schema, migrations, indexing, query performance, and data integrity.",
+      "mustNotOwn": ["API behavior outside persistence", "frontend behavior"]
+    },
+    "AGT-architect-agent": {
+      "id": "AGT-architect-agent",
+      "displayName": "Architect",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["solo", "launch"],
+      "routable": true,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/architect-agent.md",
+      "routeToolName": "call_architect_agent",
+      "routeDescription": "Route architecture decisions, system boundaries, component relationships, architecture documents, and durable design plans to the architect.",
+      "toolBundles": ["skills", "runtime", "mesh", "context"],
+      "peerTargets": [
+        "AGT-backend-dev-agent",
+        "AGT-database-admin-agent",
+        "AGT-devops-agent",
+        "AGT-frontend-dev-agent",
+        "AGT-office-document-agent",
+        "AGT-qa-agent",
+        "AGT-research-agent",
+        "AGT-senior-dev-agent"
+      ],
+      "maxPeerDepth": 3,
+      "seniorGate": "delivery",
+      "authority": "Architecture shape, system boundaries, project-level design, and persistent architecture documents.",
+      "mustNotOwn": ["final code quality gate", "hands-on implementation by default"]
+    },
+    "AGT-research-agent": {
+      "id": "AGT-research-agent",
+      "displayName": "Research",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["solo", "launch"],
+      "routable": true,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/research-agent.md",
+      "routeToolName": "call_research_agent",
+      "routeDescription": "Route web research, current documentation, provider/model facts, library choices, security/vendor/licensing checks, and evidence briefs to Research.",
+      "toolBundles": ["skills", "web", "context"],
+      "maxPeerDepth": 3,
+      "seniorGate": "off",
+      "authority": "Current external evidence, source-backed technical research, and decision-grade briefs.",
+      "mustNotOwn": ["implementation", "architecture approval"]
+    },
+    "AGT-financial-agent": {
+      "id": "AGT-financial-agent",
+      "displayName": "Financial",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["solo", "launch"],
+      "routable": true,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/financial-agent.md",
+      "routeToolName": "call_financial_agent",
+      "routeDescription": "Route personal budget, spending, income, savings, debt, investing, and money-planning questions to the financial specialist.",
+      "toolBundles": ["skills", "web", "budget", "context"],
+      "maxPeerDepth": 3,
+      "seniorGate": "off",
+      "authority": "Personal finance analysis and budget data interpretation.",
+      "mustNotOwn": ["engineering tasks", "runtime architecture"]
+    },
+    "AGT-runtime-librarian-agent": {
+      "id": "AGT-runtime-librarian-agent",
+      "displayName": "Librarian",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["solo"],
+      "routable": false,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/runtime-librarian-agent.md",
+      "toolBundles": ["runtime", "context"],
+      "maxPeerDepth": 3,
+      "seniorGate": "off",
+      "authority": "Runtime inventory, prompt/config provenance, architecture indexing, and source-of-truth lookup.",
+      "mustNotOwn": ["planning", "implementation", "repair ownership"]
+    },
+    "AGT-office-document-agent": {
+      "id": "AGT-office-document-agent",
+      "displayName": "Office",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["solo", "launch"],
+      "routable": true,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/office-document-agent.md",
+      "routeToolName": "call_office_document_agent",
+      "routeDescription": "Route Microsoft Word, Excel, and calendar artifact creation, DOCX/XLSX reports, formatted documents, tables, spreadsheet workbooks, and ICS calendar files to the Office document specialist.",
+      "toolBundles": ["office", "context"],
+      "peerTargets": [
+        "AGT-architect-agent",
+        "AGT-project-manager-agent",
+        "AGT-qa-agent",
+        "AGT-research-agent"
+      ],
+      "maxPeerDepth": 3,
+      "seniorGate": "off",
+      "authority": "DOCX, XLSX, and ICS artifact generation, formatting, workbook structure, calendar event packaging, and document packaging.",
+      "mustNotOwn": ["source research", "architecture decisions", "code implementation"]
+    },
+    "AGT-sage-orchestrator": {
+      "id": "AGT-sage-orchestrator",
+      "displayName": "Sage Orchestrator",
+      "enabled": true,
+      "targetable": false,
+      "routable": false,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/sage-orchestrator.md",
+      "seniorGate": "off"
+    },
+    "AGT-sage": {
+      "id": "AGT-sage",
+      "displayName": "Sage",
+      "enabled": true,
+      "targetable": true,
+      "supportedChatModes": ["auto", "solo"],
+      "modeLabels": {
+        "auto": "Sage Auto",
+        "solo": "Sage Only"
+      },
+      "routable": false,
+      "model": "gpt-4.1",
+      "systemPromptFile": "../prompts/sage.md",
+      "seniorGate": "off"
+    }
+  }
+}

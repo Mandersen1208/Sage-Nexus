@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.exe
+*.log
+.env
+.DS_Store
+services/manager/manager
+services/manager/manager.exe
+services/manager/.gocache/
+services/manager/.gomodcache/
+services/sage-mcp/dist/
+apps/dashboard/dist/

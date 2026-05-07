@@ -1,0 +1,18 @@
+{
+  "mcp": {
+    "servers": {
+      "sage-knowledge": {
+        "command": "node",
+        "args": ["dist/index.js"],
+        "env": {
+          "SAGE_SOUL_PATH": "/home/node/.openclaw/workspace/SOUL.md",
+          "SAGE_ARTIFACTS_DIR": "/sage-state/workspace/artifacts",
+          "MCP_SKILL_SOURCES_JSON": "[{\"id\":\"github-mcp\",\"displayName\":\"GitHub MCP\",\"endpoint\":\"http://github-mcp:3031\",\"trust\":\"untrusted\",\"enabled\":true}]"
+        }
+      }
+    }
+  },
+  "agents": {
+    "registry": "/sage-state/workspace/sage/agents.registry.json"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "id": "sage-agent-setup",
+  "name": "Sage Agent Setup",
+  "description": "Checklist for adding a new Sage specialist agent across manager config, prompts, orchestrator routing, MCP tool exposure, health registration, tests, and Docker rebuilds.",
+  "tags": ["sage", "agent", "manager", "mcp", "orchestrator", "docker", "runtime"]
+}

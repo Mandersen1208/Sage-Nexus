@@ -1,0 +1,6 @@
+{
+  "id": "sage-architecture-docs",
+  "name": "Sage Architecture Docs",
+  "description": "Workflow for creating persistent project architecture documents with architect, senior-dev approval, and runtime librarian indexing.",
+  "tags": ["sage", "architecture", "adr", "c4", "arc42", "senior-dev", "librarian", "workspace"]
+}

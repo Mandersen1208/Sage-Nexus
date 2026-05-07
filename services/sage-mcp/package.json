@@ -1,0 +1,28 @@
+{
+  "name": "sage-mcp",
+  "version": "1.0.0",
+  "description": "Standalone MCP server exposing Sage runtime, context, artifact, and skill tools.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "tsx tests/runtime-inventory.test.ts && tsx tests/skills.test.ts && tsx tests/agent-context.test.ts && tsx tests/agent-call.test.ts && tsx tests/office.test.ts",
+    "start": "npx tsx src/index.ts",
+    "dev": "npx tsx watch src/index.ts"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "docx": "^9.6.1",
+    "exceljs": "^4.4.0",
+    "pg": "^8.16.3",
+    "tsx": "^4.21.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "typescript": "^6.0.2"
+  }
+}
