@@ -381,6 +381,7 @@ func main() {
 		}
 	}
 	chatSessions := sageagents.NewRedisChatSessionStore(rc, sessionTTLHours)
+	dispatchSessions := sageagents.NewRedisSessionStore(rc, sessionTTLHours)
 	var workContexts *sageagents.WorkContextStore
 	if managerEnvBool("SAGE_WORK_CONTEXT_ENABLED", true) {
 		workContextTTLHours := envIntOr("SAGE_WORK_CONTEXT_TTL_HOURS", sessionTTLHours)
@@ -457,7 +458,7 @@ func main() {
 				continue
 			}
 			log.Printf("← [%s] cap=%s  content=%.60s...", task.TaskID, task.Capability, task.Content)
-			go handleTask(ctx, rc, orchestrator, sageRunner, acpClient, pub, chatSessions, workContexts, task)
+			go handleTask(ctx, rc, orchestrator, sageRunner, acpClient, pub, chatSessions, dispatchSessions, workContexts, task)
 		}
 	}()
 
@@ -536,6 +537,7 @@ func main() {
 			Content:    body.Content,
 			Capability: body.Capability,
 			Resource:   body.Resource,
+			Source:     "dispatch",
 		}
 		if task.TaskID == "" {
 			task.TaskID = newTaskID()
@@ -548,7 +550,7 @@ func main() {
 		}
 		log.Printf("← [%s] (HTTP) cap=%s  content=%.60s...", task.TaskID, task.Capability, task.Content)
 
-		reply := runTask(r.Context(), rc, orchestrator, sageRunner, acpClient, pub, chatSessions, workContexts, task)
+		reply := runTask(r.Context(), rc, orchestrator, sageRunner, acpClient, pub, chatSessions, dispatchSessions, workContexts, task)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(reply)
 	})
@@ -1680,6 +1682,105 @@ func managerEnvBool(key string, def bool) bool {
 	}
 }
 
+func shouldUseDispatchRollingContext(task inboundTask, useSage bool) bool {
+	if useSage || strings.TrimSpace(task.ContextID) == "" {
+		return false
+	}
+	source := strings.TrimSpace(strings.ToLower(task.Source))
+	return source == "" || source == "dispatch"
+}
+
+func truncateDispatchText(s string, maxChars int) string {
+	if maxChars <= 0 {
+		return ""
+	}
+	trimmed := strings.TrimSpace(s)
+	if len(trimmed) <= maxChars {
+		return trimmed
+	}
+	return trimmed[:maxChars] + "..."
+}
+
+func buildDispatchRollingInput(
+	ctx context.Context,
+	store sageagents.SessionStore,
+	contextID string,
+	currentInput string,
+) string {
+	if store == nil || strings.TrimSpace(contextID) == "" {
+		return currentInput
+	}
+	prior := store.Load(ctx, contextID)
+	if len(prior) == 0 {
+		return currentInput
+	}
+	maxMessages := envIntOr("MANAGER_DISPATCH_ROLLING_MAX_MESSAGES", 12)
+	if maxMessages <= 0 {
+		return currentInput
+	}
+	start := len(prior) - maxMessages
+	if start < 0 {
+		start = 0
+	}
+	maxChars := envIntOr("MANAGER_DISPATCH_ROLLING_MAX_CHARS", 700)
+	var b strings.Builder
+	b.WriteString("Recent rolling context for continuity:\n")
+	added := 0
+	for _, msg := range prior[start:] {
+		role := strings.TrimSpace(strings.ToLower(msg.Role))
+		content := strings.TrimSpace(msg.Content)
+		if content == "" {
+			continue
+		}
+		switch role {
+		case "assistant":
+			b.WriteString("Manager: ")
+		case "user":
+			b.WriteString("User: ")
+		default:
+			continue
+		}
+		b.WriteString(truncateDispatchText(content, maxChars))
+		b.WriteString("\n")
+		added++
+	}
+	if added == 0 {
+		return currentInput
+	}
+	b.WriteString("\nCurrent request:\n")
+	b.WriteString(strings.TrimSpace(currentInput))
+	return b.String()
+}
+
+func persistDispatchRollingTurn(
+	ctx context.Context,
+	store sageagents.SessionStore,
+	task inboundTask,
+	userInput string,
+	reply SageResponse,
+	useSage bool,
+) {
+	if store == nil || useSage || strings.TrimSpace(task.ContextID) == "" {
+		return
+	}
+	source := strings.TrimSpace(strings.ToLower(task.Source))
+	if source != "" && source != "dispatch" {
+		return
+	}
+	userText := strings.TrimSpace(userInput)
+	if userText != "" {
+		store.Append(ctx, task.ContextID, sageagents.ChatMessage{Role: "user", Content: userText})
+	}
+	assistantText := strings.TrimSpace(reply.Content)
+	if assistantText == "" {
+		assistantText = strings.TrimSpace(reply.Error)
+	}
+	if assistantText != "" {
+		store.Append(ctx, task.ContextID, sageagents.ChatMessage{Role: "assistant", Content: assistantText})
+	}
+	store.Trim(ctx, task.ContextID, envIntOr("MANAGER_DISPATCH_ROLLING_MAX_MESSAGES", 12))
+}
+
 // handleTask is the Redis-driven entry point. It runs the same pipeline as
 // /dispatch via runTask, then logs and discards the response (the response
 // is delivered to Sage entirely through sage:events).
@@ -1691,10 +1792,11 @@ func handleTask(
 	acp *sageagents.ACPClient,
 	pub *sageagents.ErrorPublisher,
 	chatSessions *sageagents.RedisChatSessionStore,
+	dispatchSessions sageagents.SessionStore,
 	workContexts *sageagents.WorkContextStore,
 	task inboundTask,
 ) {
-	runTask(ctx, rc, orch, sage, acp, pub, chatSessions, workContexts, task)
+	runTask(ctx, rc, orch, sage, acp, pub, chatSessions, dispatchSessions, workContexts, task)
 }
 
 // runTask is the unified orchestration pipeline used by both the Redis
@@ -1709,6 +1811,7 @@ func runTask(
 	acp *sageagents.ACPClient,
 	pub *sageagents.ErrorPublisher,
 	chatSessions *sageagents.RedisChatSessionStore,
+	dispatchSessions sageagents.SessionStore,
 	workContexts *sageagents.WorkContextStore,
 	task inboundTask,
 ) SageResponse {
@@ -1839,6 +1942,9 @@ func runTask(
 		agentMode = sageagents.ChatModeAuto
 	}
 	useSage := sage != nil && agentMode == sageagents.ChatModeAuto && (task.Capability == sageagents.SageFrontOfHouseCapability || task.Source == "local-chat")
+	if shouldUseDispatchRollingContext(task, useSage) {
+		orchestrationInput = buildDispatchRollingInput(ctx, dispatchSessions, task.ContextID, orchestrationInput)
+	}
 	var (
 		result   string
 		err      error
@@ -2030,6 +2136,8 @@ finalize:
 		reply.Status = "ok"
 		reply.Content = result
 	}
+
+	persistDispatchRollingTurn(ctx, dispatchSessions, task, task.Content, reply, useSage)
 
 	// Consume ACP execution token after the response is published.
 	if acp != nil && etID != "" {

@@ -170,28 +170,28 @@ func TestResolveSageRevoicePolicy(t *testing.T) {
 }
 
 func TestClassifyDelegatedRevoice(t *testing.T) {
-	t.Run("normal answer gets full revoice by default", func(t *testing.T) {
+	t.Run("normal answer uses pass-through by default", func(t *testing.T) {
 		t.Setenv("SAGE_REVOICE_POLICY", "")
 		t.Setenv("SAGE_REVOICE_DELEGATED", "")
 		got := classifyDelegatedRevoice("explain why the latency is better", "The latency improved because one model hop was removed.")
-		if got.Policy != revoicePolicySelective || got.Mode != revoiceModeFull || got.Reason != "normal_answer" {
+		if got.Policy != revoicePolicySelective || got.Mode != revoiceModeSkip || got.SkipReason != "pass_through_default" {
 			t.Fatalf("classifyDelegatedRevoice() = policy %q mode %q reason %q", got.Policy, got.Mode, got.Reason)
 		}
 	})
 
-	t.Run("technical docs use wrapper", func(t *testing.T) {
+	t.Run("technical docs use pass-through", func(t *testing.T) {
 		t.Setenv("SAGE_REVOICE_POLICY", "selective")
 		got := classifyDelegatedRevoice("create technical documentation for the chat API", "## Overview\n\nUse POST /chat.\n\n## Routes\n\n| Method | Route |\n| --- | --- |")
-		if got.Mode != revoiceModeWrapper || got.Reason != "technical_artifact" {
-			t.Fatalf("classifyDelegatedRevoice() = mode %q reason %q, want wrapper technical_artifact", got.Mode, got.Reason)
+		if got.Mode != revoiceModeSkip || got.SkipReason != "technical_artifact" {
+			t.Fatalf("classifyDelegatedRevoice() = mode %q skip %q, want skip technical_artifact", got.Mode, got.SkipReason)
 		}
 	})
 
-	t.Run("code blocks use wrapper", func(t *testing.T) {
+	t.Run("code blocks use pass-through", func(t *testing.T) {
 		t.Setenv("SAGE_REVOICE_POLICY", "selective")
 		got := classifyDelegatedRevoice("show the config", "```yaml\nSAGE_REVOICE_POLICY: selective\n```")
-		if got.Mode != revoiceModeWrapper {
-			t.Fatalf("classifyDelegatedRevoice() mode = %q, want wrapper", got.Mode)
+		if got.Mode != revoiceModeSkip || got.SkipReason != "technical_artifact" {
+			t.Fatalf("classifyDelegatedRevoice() = mode %q skip %q, want skip technical_artifact", got.Mode, got.SkipReason)
 		}
 	})
 

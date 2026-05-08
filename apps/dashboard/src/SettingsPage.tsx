@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  createNewContextId,
 	composeSkill,
 	createToolCatalogItem,
 	deleteSkill,
@@ -229,6 +230,7 @@ export default function SettingsPage() {
   const [toolAiPrompt, setToolAiPrompt] = useState("");
   const [toolAiMessages, setToolAiMessages] = useState<ManagerChatMessage[]>([]);
   const [toolAiBusy, setToolAiBusy] = useState(false);
+  const [toolAiSessionId, setToolAiSessionId] = useState<string>(() => createNewContextId());
   const [skills, setSkills] = useState<SkillCatalogItem[]>([]);
   const [skillModalOpen, setSkillModalOpen] = useState(false);
   const [skillDraft, setSkillDraft] = useState<SkillDraft>(defaultSkillDraft);
@@ -239,6 +241,7 @@ export default function SettingsPage() {
   const [skillAiPrompt, setSkillAiPrompt] = useState("");
   const [skillAiMessages, setSkillAiMessages] = useState<ManagerChatMessage[]>([]);
   const [skillAiBusy, setSkillAiBusy] = useState(false);
+  const [skillAiSessionId, setSkillAiSessionId] = useState<string>(() => createNewContextId());
   const timerRef = useRef<number | null>(null);
 
   const clearTimer = useCallback(() => {
@@ -312,6 +315,7 @@ export default function SettingsPage() {
     setSkillAdvancedOpen(false);
     setSkillAiPrompt("");
     setSkillAiMessages([]);
+    setSkillAiSessionId(createNewContextId());
     setSkillError(null);
     setSkillModalOpen(true);
   }, []);
@@ -338,6 +342,7 @@ export default function SettingsPage() {
       setSkillAdvancedOpen(false);
       setSkillAiPrompt("");
       setSkillAiMessages([]);
+      setSkillAiSessionId(createNewContextId());
       setSkillModalOpen(true);
     };
     void run()
@@ -606,6 +611,7 @@ export default function SettingsPage() {
     setEditingToolId(null);
     setToolAiPrompt("");
     setToolAiMessages([]);
+    setToolAiSessionId(createNewContextId());
     setToolError(null);
     setToolModalOpen(true);
   }, [localSetup]);
@@ -625,6 +631,7 @@ export default function SettingsPage() {
     setEditingToolId(tool.id);
     setToolAiPrompt("");
     setToolAiMessages([]);
+    setToolAiSessionId(createNewContextId());
     setToolError(null);
     setToolModalOpen(true);
   }, [localSetup]);
@@ -636,6 +643,8 @@ export default function SettingsPage() {
       return;
     }
     const run = async () => {
+      const sessionId = skillAiSessionId || createNewContextId();
+      if (sessionId !== skillAiSessionId) setSkillAiSessionId(sessionId);
       setSkillAiBusy(true);
       setSkillError(null);
       setSkillAiMessages((prev) => [...prev, { role: "user", text: prompt, ts: Date.now() }]);
@@ -649,8 +658,10 @@ export default function SettingsPage() {
           "If possible include a JSON object too (optional) with shape:",
           '{"id":"","name":"","description":"","tags":[],"trigger":"","assignedAgentIds":[],"inputs":"","outputs":"","notes":""}',
           "Use lowercase hyphenated id and concise executable wording.",
-          `User request: ${prompt}`,
+          `Latest user request: ${prompt}`,
         ].join("\n"),
+        undefined,
+        sessionId,
       );
       setSkillAiMessages((prev) => [...prev, { role: "manager", text: response.content, ts: Date.now() }]);
       const parsed = extractJsonObject(response.content);
@@ -685,7 +696,7 @@ export default function SettingsPage() {
     void run()
       .catch((e) => setSkillError(e instanceof Error ? e.message : String(e)))
       .finally(() => setSkillAiBusy(false));
-  }, [skillAiPrompt]);
+  }, [skillAiPrompt, skillAiSessionId]);
 
   const onAskManagerForTool = useCallback(() => {
     const prompt = toolAiPrompt.trim();
@@ -694,6 +705,8 @@ export default function SettingsPage() {
       return;
     }
     const run = async () => {
+      const sessionId = toolAiSessionId || createNewContextId();
+      if (sessionId !== toolAiSessionId) setToolAiSessionId(sessionId);
       setToolAiBusy(true);
       setToolError(null);
       setToolAiMessages((prev) => [...prev, { role: "user", text: prompt, ts: Date.now() }]);
@@ -707,8 +720,10 @@ export default function SettingsPage() {
           "If possible include a JSON object too (optional) with shape:",
           '{"id":"","name":"","description":"","command":"","args":"","area":"","assignedAgentIds":[]}',
           "Use practical executable defaults.",
-          `User request: ${prompt}`,
+          `Latest user request: ${prompt}`,
         ].join("\n"),
+        undefined,
+        sessionId,
       );
       setToolAiMessages((prev) => [...prev, { role: "manager", text: response.content, ts: Date.now() }]);
       const parsed = extractJsonObject(response.content);
@@ -739,7 +754,7 @@ export default function SettingsPage() {
     void run()
       .catch((e) => setToolError(e instanceof Error ? e.message : String(e)))
       .finally(() => setToolAiBusy(false));
-  }, [toolAiPrompt]);
+  }, [toolAiPrompt, toolAiSessionId]);
 
   const onAddLocalTool = useCallback(() => {
     const id = toolDraft.id.trim();

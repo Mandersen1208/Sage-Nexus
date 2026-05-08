@@ -644,7 +644,11 @@ export async function sendChat(
   return (await res.json()) as ChatResponse;
 }
 
-export async function dispatchManager(content: string, capability?: string): Promise<DispatchResponse> {
+export async function dispatchManager(
+  content: string,
+  capability?: string,
+  sessionId?: string,
+): Promise<DispatchResponse> {
   const res = await fetch(`${MANAGER_URL}/dispatch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -652,6 +656,7 @@ export async function dispatchManager(content: string, capability?: string): Pro
       content,
       capability: capability ?? "acp:cap:skill.agent-delegate",
       resource: "sage://workspace/*",
+      session_id: sessionId ?? "",
     }),
   });
   if (!res.ok) {

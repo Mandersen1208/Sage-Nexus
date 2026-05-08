@@ -263,8 +263,13 @@ func (r *SageRunner) runDelegated(
 	}
 	log.Printf("  [%s] orchestrator ok (%s) replyLen=%d", SageAgentID, dur, len(out))
 	EmitProgress(ctx, ProgressEvent{Type: "route", Agent: SageAgentID, Tool: "call_orchestrator", Phase: "end", Mode: "delegate", RouteReason: decision.Reason, DurationMS: dur.Milliseconds(), Timestamp: time.Now().Unix()})
-
-	return r.applyDelegatedRevoice(ctx, userInput, out)
+	managerReply := out
+	if envBool("SAGE_DELEGATED_PREFER_WORKER_REPLY", true) {
+		if workerReply := strings.TrimSpace(r.Orchestrator.LastReply()); workerReply != "" {
+			managerReply = workerReply
+		}
+	}
+	return r.applyDelegatedRevoice(ctx, userInput, managerReply)
 }
 
 func shouldRevoiceDelegated() bool {
@@ -312,7 +317,7 @@ func (r *SageRunner) applyDelegatedRevoice(ctx context.Context, userInput, manag
 	case revoiceModeFull:
 		return r.revoiceDelegatedReply(ctx, userInput, managerReply)
 	case revoiceModeWrapper:
-		return wrapDelegatedReply(managerReply), nil
+		return managerReply, nil
 	default:
 		return managerReply, nil
 	}
@@ -344,10 +349,10 @@ func classifyDelegatedRevoice(userInput, managerReply string) sageRevoiceDecisio
 		return sageRevoiceDecision{Policy: policy, Mode: revoiceModeSkip, Reason: "tool_error", SkipReason: "tool_error"}
 	}
 	if shouldWrapDelegatedReply(userInput, trimmed) {
-		return sageRevoiceDecision{Policy: policy, Mode: revoiceModeWrapper, Reason: "technical_artifact"}
+		return sageRevoiceDecision{Policy: policy, Mode: revoiceModeSkip, Reason: "technical_artifact", SkipReason: "technical_artifact"}
 	}
 
-	return sageRevoiceDecision{Policy: policy, Mode: revoiceModeFull, Reason: "normal_answer"}
+	return sageRevoiceDecision{Policy: policy, Mode: revoiceModeSkip, Reason: "pass_through_default", SkipReason: "pass_through_default"}
 }
 
 func emitSageRevoiceDecision(ctx context.Context, decision sageRevoiceDecision) {
