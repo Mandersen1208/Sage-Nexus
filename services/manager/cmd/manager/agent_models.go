@@ -162,6 +162,7 @@ func (r *agentModelRuntime) Catalog() agentModelCatalog {
 			Source:          source,
 		})
 	}
+	modelOptions[sageagents.DefaultCodexModelRef] = struct{}{}
 
 	if r.stateDir != "" && r.listModels != nil {
 		if discovered, err := r.listModels(r.stateDir); err == nil {
@@ -205,6 +206,9 @@ func (r *agentModelRuntime) Update(ctx context.Context, agentID, model string) (
 
 	if !r.isKnownAgentLocked(agentID) {
 		return agentModelItem{}, fmt.Errorf("unknown agent %s", agentID)
+	}
+	if err := sageagents.ValidateAgentProviderModel(agentID, model); err != nil {
+		return agentModelItem{}, err
 	}
 
 	target := model

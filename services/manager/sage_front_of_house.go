@@ -110,8 +110,8 @@ func loadSageSystemPrompt(cfg *AgentsConfig) (string, string) {
 	return prompt, "bundled"
 }
 
-// Run executes one Sage turn. Chit-chat can stay with Sage directly, but any
-// real work goes straight to the orchestrator without a tool-choice model round.
+// Run executes Sage Auto. Sage is the user-facing chat layer; the manager /
+// orchestrator owns the work routing for this mode.
 func (r *SageRunner) Run(
 	ctx context.Context,
 	contextID, userInput string,
@@ -124,10 +124,12 @@ func (r *SageRunner) Run(
 		tracker.Add(AgentHandoff{AgentID: SageAgentID, Role: "front-of-house"})
 	}
 
-	classifyStart := time.Now()
-	decision := classifySageRoute(userInput)
-	EmitLatencySpan(ctx, "sage_classify", classifyStart)
-	AppendWorkContextEvent(ctx, "sage_route", SageAgentID, "Sage route classified", "", map[string]interface{}{
+	decision := sageRouteDecision{
+		Direct: false,
+		Mode:   "delegate",
+		Reason: "sage_auto_routes_to_orchestrator",
+	}
+	AppendWorkContextEvent(ctx, "sage_route", SageAgentID, "Sage Auto routed to manager/orchestrator", "", map[string]interface{}{
 		"mode":   decision.Mode,
 		"reason": decision.Reason,
 		"direct": decision.Direct,
@@ -135,7 +137,7 @@ func (r *SageRunner) Run(
 	EmitProgress(ctx, ProgressEvent{
 		Type:        "route",
 		Agent:       SageAgentID,
-		Tool:        "sage_route",
+		Tool:        "sage_auto_route",
 		Phase:       "end",
 		Mode:        decision.Mode,
 		RouteReason: decision.Reason,
@@ -150,23 +152,8 @@ func (r *SageRunner) Run(
 		}
 	}
 
-	messages := make([]ChatMessage, 0, 2+len(prior))
-	if r.Sage.SystemPrompt != "" {
-		messages = append(messages, ChatMessage{Role: "system", Content: r.Sage.SystemPrompt})
-	}
-	messages = append(messages, prior...)
 	userMsg := ChatMessage{Role: "user", Content: userInput}
-	messages = append(messages, userMsg)
-
-	var (
-		reply string
-		err   error
-	)
-	if decision.Direct {
-		reply, err = r.runDirect(ctx, messages, decision)
-	} else {
-		reply, err = r.runDelegated(ctx, prior, userInput, decision, tracker)
-	}
+	reply, err := r.runDelegated(ctx, prior, userInput, decision, tracker)
 	if err != nil {
 		return reply, err
 	}
@@ -592,6 +579,9 @@ func classifySageRoute(input string) sageRouteDecision {
 	if isVoiceFeedback(normalized) {
 		return sageRouteDecision{Direct: true, Mode: "direct", Reason: "voice_feedback"}
 	}
+	if isCasualCreativeRequest(normalized) {
+		return sageRouteDecision{Direct: true, Mode: "direct", Reason: "casual_creative"}
+	}
 	if reason := delegationReason(normalized); reason != "" {
 		return sageRouteDecision{Direct: false, Mode: "delegate", Reason: reason}
 	}
@@ -674,6 +664,19 @@ func isVoiceFeedback(normalized string) bool {
 		"your voice back",
 		"sound like yourself",
 		"sound more like sage",
+	})
+}
+
+func isCasualCreativeRequest(normalized string) bool {
+	return containsAny(normalized, []string{
+		"tell me a story",
+		"tell a story",
+		"make up a story",
+		"bedtime story",
+		"write me a story",
+		"tell me something funny",
+		"make me laugh",
+		"chat with me",
 	})
 }
 

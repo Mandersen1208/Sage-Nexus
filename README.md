@@ -8,8 +8,18 @@ Sage Nexus keeps the current Sage shape:
 - Sage front-of-house persona backed by `SOUL.md`.
 - Go ACP admission service.
 - TypeScript MCP tool service.
-- Vite/React dashboard with chat, task telemetry, model controls, sessions, stop/continue, and targeted agent modes.
+- Vite/React dashboard with chat, task telemetry, model controls, files, skills governance, settings, sessions, stop/continue, and targeted agent modes.
 - Redis for task events, chat sessions, work context, and runtime state.
+- Postgres/pgvector canonical skill registry for discovered and local skills.
+
+## Feature Highlights
+
+- Manager remains the orchestrator; Sage remains front-of-house persona.
+- Canonical skill discovery pipeline for local + external MCP sources.
+- Server + per-skill governance (`quarantined`, `released`, `disabled`) with trust-aware defaults.
+- Daily source sync at local `2:00 AM` plus manual sync endpoints/actions.
+- `/dispatch` session-based rolling short-term memory window for manager chat/tool drafting flows.
+- Delegated reply pass-through defaults that preserve worker output fidelity.
 
 ## Current Defaults
 
@@ -60,6 +70,29 @@ POST /providers/copilot/refresh
 ```
 
 Device login defaults to the Copilot OAuth client flow. Set `GITHUB_CLIENT_ID` only when intentionally testing a different OAuth app. For a quick local smoke, set `GH_TOKEN` or `GITHUB_TOKEN`.
+
+## Codex Bridge
+
+`AGT-sage` defaults to the first Codex subscription-backed path:
+`codex/gpt-5.5`. Other agents can also be switched to provider refs such as
+`codex/gpt-5.5` through `/models`. This uses a local host-side Codex CLI bridge
+instead of `OPENAI_API_KEY`; manager-mediated MCP/local tools remain owned by
+the manager.
+
+Start the bridge on Windows before Docker:
+
+```powershell
+cd C:\Users\matta\code\sage-nexus\services\manager
+go run .\cmd\codex-bridge
+```
+
+Then verify from the manager:
+
+```powershell
+Invoke-RestMethod http://localhost:8090/providers/codex/status
+```
+
+See `docs/CODEX_BRIDGE.md` for setup and rollback notes.
 
 ## Layout
 

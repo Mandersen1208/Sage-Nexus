@@ -112,7 +112,7 @@ func TestAgentModelUpdate_ClearsOverride(t *testing.T) {
 	t.Logf("✓ Override cleared: AGT-sage reverted to gpt-4.1 from registry")
 }
 
-func TestAgentModelCatalog_UsesCopilotOptionsOnly(t *testing.T) {
+func TestAgentModelCatalog_IncludesCodexOption(t *testing.T) {
 	cfg := &sageagents.AgentsConfig{
 		Agents: map[string]sageagents.AgentConfig{
 			"AGT-sage": {
@@ -135,9 +135,8 @@ func TestAgentModelCatalog_UsesCopilotOptionsOnly(t *testing.T) {
 	}
 
 	catalog := runtime.Catalog()
-	want := []string{"claude-sonnet-4-5", "gpt-4.1"}
-	if len(catalog.ModelOptions) != len(want) {
-		t.Logf("model options differ: got %v, want %v", catalog.ModelOptions, want)
+	if !containsString(catalog.ModelOptions, sageagents.DefaultCodexModelRef) {
+		t.Fatalf("expected codex option %s, got %v", sageagents.DefaultCodexModelRef, catalog.ModelOptions)
 	}
 	if len(catalog.Agents) != 2 {
 		t.Fatalf("expected all configured agents in catalog, got=%d", len(catalog.Agents))
@@ -167,16 +166,51 @@ func TestAgentModelCatalog_StillListsAgentsWhenCopilotLookupFails(t *testing.T) 
 	}
 
 	catalog := runtime.Catalog()
-	if len(catalog.ModelOptions) != 0 {
-		t.Fatalf("expected empty model options on lookup failure, got=%v", catalog.ModelOptions)
+	if len(catalog.ModelOptions) != 1 || catalog.ModelOptions[0] != sageagents.DefaultCodexModelRef {
+		t.Fatalf("expected only codex model option on lookup failure, got=%v", catalog.ModelOptions)
 	}
 	if len(catalog.Agents) != 2 {
 		t.Fatalf("expected all configured agents in catalog, got=%d", len(catalog.Agents))
 	}
 }
 
+func TestAgentModelUpdate_AllowsCodexForWorkers(t *testing.T) {
+	cfg := &sageagents.AgentsConfig{
+		Agents: map[string]sageagents.AgentConfig{
+			"AGT-sage": {
+				ID:          "AGT-sage",
+				DisplayName: "Sage",
+				Model:       "gpt-4.1",
+			},
+			"AGT-backend-dev-agent": {
+				ID:          "AGT-backend-dev-agent",
+				DisplayName: "Backend",
+				Model:       "gpt-4.1",
+			},
+		},
+	}
+	runtime := newAgentModelRuntime(cfg, nil, nil, nil, nil, "")
+	runtime.listModels = func(_ string) ([]string, error) { return nil, nil }
+
+	if _, err := runtime.Update(context.Background(), "AGT-backend-dev-agent", sageagents.DefaultCodexModelRef); err != nil {
+		t.Fatalf("expected worker codex update to succeed: %v", err)
+	}
+	if _, err := runtime.Update(context.Background(), "AGT-sage", sageagents.DefaultCodexModelRef); err != nil {
+		t.Fatalf("expected Sage codex update to succeed: %v", err)
+	}
+}
+
 func boolPtr(v bool) *bool {
 	return &v
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // TestAgentModelUpdate_WorkerActiveModelReflectsChange verifies that calling

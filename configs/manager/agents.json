@@ -339,7 +339,7 @@
       },
       "routable": false,
       "model": "gpt-4.1",
-      "systemPromptFile": "../prompts/sage.md",
+      "systemPromptFile": "../prompts/sage-orchestrator.md",
       "seniorGate": "off"
     }
   }

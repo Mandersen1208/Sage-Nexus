@@ -64,7 +64,7 @@ const SAGE_PROFILE_IMAGE = "/sage-profile.jpg";
 const FALLBACK_MODE: ChatModeSelection = {
   agentMode: "auto",
   label: "Sage Auto",
-  description: "Let Sage decide the route.",
+  description: "Sage Auto sends the turn through the manager/orchestrator.",
 };
 
 function transcriptKey(contextId: string): string {

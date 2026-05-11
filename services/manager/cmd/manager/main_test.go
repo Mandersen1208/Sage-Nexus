@@ -28,6 +28,9 @@ func TestRegistryControlledToolExposure(t *testing.T) {
 	if !hasTool(finTools, "budget_get_current_month") {
 		t.Fatalf("financial agent should have budget tools")
 	}
+	if !hasTool(finTools, "budget_get_month_checkup") {
+		t.Fatalf("financial agent should have deterministic budget checkup tool")
+	}
 
 	backendTools := filteredRegistryTools(t, cfg, available, "AGT-backend-dev-agent")
 	if hasTool(backendTools, "searxng_search") {

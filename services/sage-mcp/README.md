@@ -17,14 +17,34 @@ HTTP mode for Docker/local manager integration:
 TRANSPORT=http PORT=3030 npm start
 ```
 
-Health:
+Health and discovery/governance HTTP routes:
 
 ```text
 GET /health
 POST /mcp
 GET /skills/discovery/servers
+POST /skills/discovery/servers
+PATCH /skills/discovery/servers/{id}
+POST /skills/discovery/servers/{id}/release
+POST /skills/discovery/servers/{id}/sync
 POST /skills/discovery/sync
+GET /skills/discovery/skills
+PATCH /skills/discovery/skills/{id}
+GET /skills/discovery/search
 ```
+
+## Skill Discovery Behavior
+
+- Canonical registry tables are maintained in Postgres/pgvector:
+  - `mcp_skill_sources`
+  - `canonical_skills`
+- Local skills are auto-registered as trusted source `local://skills`.
+- External source defaults:
+  - `trusted` -> discovered skills default `released`
+  - `untrusted` -> discovered skills default `quarantined`
+- Retrieval/search returns only released skills from enabled sources, with optional agent allowlist filtering.
+- Scheduler runs `syncAllSources()` once per day at local `2:00 AM`.
+- Manager-side manual sync and release operations are supported through manager proxy endpoints.
 
 ## Runtime Env
 

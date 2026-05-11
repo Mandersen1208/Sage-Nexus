@@ -91,7 +91,7 @@ func (c *AgentsConfig) BuildChatCatalog() ChatCatalog {
 		AgentMode:     ChatModeAuto,
 		TargetAgentID: "",
 		Label:         "Sage Auto",
-		Description:   "Let Sage decide whether to answer directly or route through the mesh.",
+		Description:   "Sage Auto sends the turn through the manager/orchestrator.",
 	}
 	if c != nil {
 		if selection, err := c.ResolveChatSelection(ChatModeAuto, ""); err == nil {
@@ -265,9 +265,9 @@ func (a AgentConfig) modeDescription(mode string) string {
 	}
 	switch mode {
 	case ChatModeAuto:
-		return "Let Sage decide whether to answer directly or route through the mesh."
+		return "Sage Auto sends the turn through the manager/orchestrator."
 	case ChatModeSolo:
-		return "Talk only with this agent; peer dispatch and flow launch stay off."
+		return "Direct chat with this agent as a persona; worker routing stays off."
 	case ChatModeLaunch:
 		return "Start a bounded flow owned by this agent."
 	default:
@@ -278,7 +278,7 @@ func (a AgentConfig) modeDescription(mode string) string {
 func (a AgentConfig) disabledChatModeReason(mode string) string {
 	mode = normalizeChatMode(mode)
 	if a.ID == SageAgentID && mode == ChatModeLaunch {
-		return "Sage already owns the automatic flow."
+		return "Sage is a persona layer; launch flows belong to the manager/orchestrator."
 	}
 	if mode == ChatModeAuto {
 		return "Auto mode is reserved for the front-of-house agent."

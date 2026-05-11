@@ -51,6 +51,8 @@ type CopilotAgent struct {
 	tokenExpiresAt time.Time
 	copilotBaseURL string
 	stateDir       string
+	codexBridgeURL string
+	codexAllowed   bool
 
 	// toolTrace records the MCP tool calls made during the last Chat() call.
 	// Reset at the start of each Chat() invocation.
@@ -170,6 +172,11 @@ func (a *CopilotAgent) SetStateDir(dir string) {
 	a.stateDir = dir
 }
 
+func (a *CopilotAgent) SetCodexBridge(url string, allowed bool) {
+	a.codexBridgeURL = strings.TrimSpace(url)
+	a.codexAllowed = allowed
+}
+
 // Metadata returns the agent's registration info for the Manager heartbeat.
 func (a *CopilotAgent) Metadata() AgentMetadata {
 	return AgentMetadata{
@@ -222,6 +229,11 @@ func (a *CopilotAgent) Chat(ctx context.Context, messages []ChatMessage) (string
 	tools := []toolDef{}
 	if a.MCP != nil {
 		tools = a.availableTools(ctx)
+	}
+
+	pm := ParseProviderModel(a.ActiveModel())
+	if pm.Provider == ProviderCodex {
+		return a.chatCodexBridge(ctx, pm.Model, messages, tools)
 	}
 
 	maxRounds := envInt("SAGE_WORKER_MAX_ROUNDS", 12) // guard against infinite tool loops
@@ -351,6 +363,129 @@ func (a *CopilotAgent) availableTools(ctxs ...context.Context) []toolDef {
 	return filtered
 }
 
+func (a *CopilotAgent) chatCodexBridge(ctx context.Context, model string, messages []ChatMessage, tools []toolDef) (string, error) {
+	if !a.codexAllowed {
+		return "", fmt.Errorf("codex provider is not enabled for %s", a.AgentID)
+	}
+	bridgeURL := strings.TrimSpace(a.codexBridgeURL)
+	if bridgeURL == "" {
+		return "", fmt.Errorf("CODEX_BRIDGE_URL is not configured")
+	}
+	start := time.Now()
+	system := ""
+	filtered := make([]ChatMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == "system" && system == "" {
+			system = msg.Content
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	client := NewCodexBridgeClient(bridgeURL)
+
+	if len(tools) == 0 {
+		reply, err := client.Chat(ctx, CodexBridgeChatRequest{
+			Model:    model,
+			System:   system,
+			Messages: filtered,
+		})
+		EmitLatencySpan(ctx, "codex_bridge_chat", start)
+		if err != nil {
+			return "", err
+		}
+		return reply, nil
+	}
+
+	maxRounds := envInt("SAGE_WORKER_MAX_ROUNDS", 12)
+	for round := 0; round < maxRounds; round++ {
+		if encoded, err := json.Marshal(filtered); err == nil {
+			AppendWorkContextEvent(ctx, "model_input", a.AgentID, "Codex model input context snapshot", string(encoded), map[string]interface{}{
+				"round":         round + 1,
+				"model":         ProviderCodex + "/" + model,
+				"message_count": len(filtered),
+				"tool_count":    len(tools),
+			})
+		}
+		resp, err := client.ChatResponse(ctx, CodexBridgeChatRequest{
+			Model:    model,
+			System:   system,
+			Messages: filtered,
+			Tools:    tools,
+		})
+		EmitLatencySpan(ctx, "codex_bridge_chat", start)
+		if err != nil {
+			return "", err
+		}
+		if resp.FinishReason != "tool_calls" || len(resp.ToolCalls) == 0 {
+			return resp.Text, nil
+		}
+		filtered = append(filtered, ChatMessage{Role: "assistant", ToolCalls: resp.ToolCalls})
+		for _, tc := range resp.ToolCalls {
+			filtered = append(filtered, a.executeMCPToolCall(ctx, tc))
+		}
+	}
+	return "", fmt.Errorf("tool loop exceeded %d rounds", maxRounds)
+}
+
+func (a *CopilotAgent) executeMCPToolCall(ctx context.Context, tc ToolCall) ChatMessage {
+	a.toolTrace = append(a.toolTrace, tc.Function.Name)
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+		args = map[string]interface{}{}
+	}
+	hadWorkContextArgs := hasWorkContextArgs(args)
+	a.injectToolArgs(ctx, tc.Function.Name, args)
+	if isAgentContextTool(tc.Function.Name) && !hadWorkContextArgs && hasWorkContextArgs(args) {
+		log.Printf("    [%s] tool injected %s work_context_id/token from runtime context", a.AgentID, tc.Function.Name)
+	}
+	start := time.Now()
+	redactedArgs := RedactSecretsInString(tc.Function.Arguments)
+	if marshaled, err := json.Marshal(args); err == nil {
+		redactedArgs = RedactSecretsInString(string(marshaled))
+	}
+	if isAgentContextTool(tc.Function.Name) && !hasWorkContextArgs(args) {
+		err := fmt.Errorf("%s requires active work context (work_context_id/token missing)", tc.Function.Name)
+		dur := time.Since(start).Round(time.Millisecond)
+		log.Printf("    [%s] tool failed %s (%s) err=%v", a.AgentID, tc.Function.Name, dur, err)
+		EmitProgress(ctx, ProgressEvent{Type: "tool", Agent: a.AgentID, Tool: tc.Function.Name, Phase: "end", DurationMS: dur.Milliseconds(), Error: err.Error(), Timestamp: time.Now().Unix()})
+		PublishError(ctx, ErrorEvent{Kind: "tool", Agent: a.AgentID, Tool: tc.Function.Name, Error: err.Error(), DurationMS: dur.Milliseconds()})
+		a.toolErrors = append(a.toolErrors, ToolCallLog{Agent: a.AgentID, Tool: tc.Function.Name, DurationMS: dur.Milliseconds(), Error: err.Error()})
+		AppendWorkContextEvent(ctx, "tool_end", a.AgentID, "MCP tool failed "+tc.Function.Name, err.Error(), map[string]interface{}{
+			"tool":        tc.Function.Name,
+			"duration_ms": dur.Milliseconds(),
+		})
+		return ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: fmt.Sprintf("error: %v", err)}
+	}
+	log.Printf("    [%s] tool -> %s args=%s", a.AgentID, tc.Function.Name, truncate(redactedArgs, 120))
+	AppendWorkContextEvent(ctx, "tool_start", a.AgentID, "Calling MCP tool "+tc.Function.Name, "", map[string]interface{}{
+		"tool": tc.Function.Name,
+		"args": redactedArgs,
+	})
+	EmitProgress(ctx, ProgressEvent{Type: "tool", Agent: a.AgentID, Tool: tc.Function.Name, Phase: "start", Timestamp: time.Now().Unix()})
+	toolResult, err := a.MCP.CallTool(tc.Function.Name, args)
+	EmitLatencySpan(ctx, "mcp_tool_"+tc.Function.Name, start)
+	dur := time.Since(start).Round(time.Millisecond)
+	if err != nil {
+		log.Printf("    [%s] tool failed %s (%s) err=%v", a.AgentID, tc.Function.Name, dur, err)
+		EmitProgress(ctx, ProgressEvent{Type: "tool", Agent: a.AgentID, Tool: tc.Function.Name, Phase: "end", DurationMS: dur.Milliseconds(), Error: err.Error(), Timestamp: time.Now().Unix()})
+		PublishError(ctx, ErrorEvent{Kind: "tool", Agent: a.AgentID, Tool: tc.Function.Name, Error: err.Error(), DurationMS: dur.Milliseconds()})
+		a.toolErrors = append(a.toolErrors, ToolCallLog{Agent: a.AgentID, Tool: tc.Function.Name, DurationMS: dur.Milliseconds(), Error: err.Error()})
+		AppendWorkContextEvent(ctx, "tool_end", a.AgentID, "MCP tool failed "+tc.Function.Name, err.Error(), map[string]interface{}{
+			"tool":        tc.Function.Name,
+			"duration_ms": dur.Milliseconds(),
+		})
+		toolResult = fmt.Sprintf("error: %v", err)
+	} else {
+		log.Printf("    [%s] tool ok %s (%s) %dB", a.AgentID, tc.Function.Name, dur, len(toolResult))
+		EmitProgress(ctx, ProgressEvent{Type: "tool", Agent: a.AgentID, Tool: tc.Function.Name, Phase: "end", DurationMS: dur.Milliseconds(), Timestamp: time.Now().Unix()})
+		AppendWorkContextEvent(ctx, "tool_end", a.AgentID, "MCP tool completed "+tc.Function.Name, toolResult, map[string]interface{}{
+			"tool":        tc.Function.Name,
+			"duration_ms": dur.Milliseconds(),
+		})
+	}
+	return ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: toolResult}
+}
+
 func (a *CopilotAgent) injectPeerCallArgs(ctx context.Context, args map[string]interface{}) {
 	if args == nil {
 		return
@@ -427,6 +562,11 @@ func (a *CopilotAgent) ChatWithLocalTools(
 	}
 	a.toolTrace = nil
 
+	pm := ParseProviderModel(a.ActiveModel())
+	if pm.Provider == ProviderCodex {
+		return a.chatCodexBridgeWithLocalTools(ctx, pm.Model, messages, tools, exec)
+	}
+
 	maxRounds := envInt("SAGE_ORCH_MAX_ROUNDS", 12)
 	for round := 0; round < maxRounds; round++ {
 		result, err := a.callCopilot(ctx, messages, tools)
@@ -476,6 +616,74 @@ func (a *CopilotAgent) ChatWithLocalTools(
 	return "", &RoundCapReachedError{Rounds: maxRounds, Messages: messages}
 }
 
+func (a *CopilotAgent) chatCodexBridgeWithLocalTools(
+	ctx context.Context,
+	model string,
+	messages []ChatMessage,
+	tools []toolDef,
+	exec func(name string, args map[string]interface{}) (string, error),
+) (string, error) {
+	if !a.codexAllowed {
+		return "", fmt.Errorf("codex provider is not enabled for %s", a.AgentID)
+	}
+	bridgeURL := strings.TrimSpace(a.codexBridgeURL)
+	if bridgeURL == "" {
+		return "", fmt.Errorf("CODEX_BRIDGE_URL is not configured")
+	}
+	system := ""
+	filtered := make([]ChatMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == "system" && system == "" {
+			system = msg.Content
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	client := NewCodexBridgeClient(bridgeURL)
+	maxRounds := envInt("SAGE_ORCH_MAX_ROUNDS", 12)
+	for round := 0; round < maxRounds; round++ {
+		start := time.Now()
+		resp, err := client.ChatResponse(ctx, CodexBridgeChatRequest{
+			Model:    model,
+			System:   system,
+			Messages: filtered,
+			Tools:    tools,
+		})
+		EmitLatencySpan(ctx, "codex_bridge_local_tools", start)
+		if err != nil {
+			return "", err
+		}
+		if resp.FinishReason != "tool_calls" || len(resp.ToolCalls) == 0 {
+			return resp.Text, nil
+		}
+		filtered = append(filtered, ChatMessage{Role: "assistant", ToolCalls: resp.ToolCalls})
+		for _, tc := range resp.ToolCalls {
+			a.toolTrace = append(a.toolTrace, tc.Function.Name)
+			var args map[string]interface{}
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				args = map[string]interface{}{}
+			}
+			start := time.Now()
+			log.Printf("  [%s] route -> %s args=%s", a.AgentID, tc.Function.Name, truncate(tc.Function.Arguments, 120))
+			EmitProgress(ctx, ProgressEvent{Type: "route", Agent: a.AgentID, Tool: tc.Function.Name, Phase: "start", Timestamp: time.Now().Unix()})
+			toolResult, err := exec(tc.Function.Name, args)
+			EmitLatencySpan(ctx, "local_tool_"+tc.Function.Name, start)
+			dur := time.Since(start).Round(time.Millisecond)
+			if err != nil {
+				log.Printf("  [%s] route failed %s (%s) err=%v", a.AgentID, tc.Function.Name, dur, err)
+				EmitProgress(ctx, ProgressEvent{Type: "route", Agent: a.AgentID, Tool: tc.Function.Name, Phase: "end", DurationMS: dur.Milliseconds(), Error: err.Error(), Timestamp: time.Now().Unix()})
+				PublishError(ctx, ErrorEvent{Kind: "route", Agent: a.AgentID, Tool: tc.Function.Name, Error: err.Error(), DurationMS: dur.Milliseconds()})
+				toolResult = fmt.Sprintf("error: %v", err)
+			} else {
+				log.Printf("  [%s] route ok %s (%s) %dB", a.AgentID, tc.Function.Name, dur, len(toolResult))
+				EmitProgress(ctx, ProgressEvent{Type: "route", Agent: a.AgentID, Tool: tc.Function.Name, Phase: "end", DurationMS: dur.Milliseconds(), Timestamp: time.Now().Unix()})
+			}
+			filtered = append(filtered, ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: toolResult})
+		}
+	}
+	return "", &RoundCapReachedError{Rounds: maxRounds, Messages: filtered}
+}
+
 // RoundCapReachedError signals the orchestrator hit its per-task tool-call
 // cap. The manager catches this, publishes input-required on the bus (with
 // the partial last reply), and waits on ChannelControl for the human's
@@ -502,6 +710,10 @@ func truncate(s string, n int) string {
 
 // callCopilot makes a single HTTP call to the Copilot completions endpoint.
 func (a *CopilotAgent) callCopilot(ctx context.Context, messages []ChatMessage, tools []toolDef) (*chatResponse, error) {
+	pm := ParseProviderModel(a.ActiveModel())
+	if pm.Provider == ProviderCodex {
+		return nil, fmt.Errorf("codex model %s cannot run on the Copilot chat path", a.ActiveModel())
+	}
 	tokenStart := time.Now()
 	token, err := a.getToken()
 	EmitLatencySpan(ctx, "provider_token", tokenStart)
@@ -510,7 +722,7 @@ func (a *CopilotAgent) callCopilot(ctx context.Context, messages []ChatMessage, 
 	}
 
 	payload := chatRequest{
-		Model:    a.ActiveModel(),
+		Model:    pm.Model,
 		Messages: messages,
 		Tools:    tools,
 		Stream:   false,

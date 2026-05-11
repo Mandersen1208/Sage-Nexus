@@ -9,9 +9,12 @@ agent choices in the UI.
 
 ## Routes
 
-- `/chat` - primary Sage chat interface.
+- `/chat` - primary Sage chat interface with shared sessions and mode selection.
 - `/dashboard` - task telemetry, timelines, event bus, handoffs, continue/stop.
 - `/models` - per-agent model configuration.
+- `/files` - manager-backed file browser/download UI.
+- `/skills` - local + discovered skill governance workflows.
+- `/settings` - provider auth and tool capability management.
 
 Nginx serves this as an SPA, so direct refresh on these routes should resolve to
 `index.html`.
@@ -28,6 +31,16 @@ Core calls live in `src/api.ts`:
 - stream events
 - agent catalog and model catalog
 - Copilot provider status
+- tool catalog CRUD
+- local skill compose/catalog CRUD
+- discovered skill source + skill governance APIs
+- manager `/dispatch` for manager-chat-assisted drafting
+
+## Current UX Surfaces
+
+- Add Tool modal includes manager-chat-assisted drafting with session continuity.
+- Skills page is the primary governance page (local skills + discovered server skills).
+- Settings no longer hosts full skill governance workflows.
 
 ## Validation
 

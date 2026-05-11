@@ -97,6 +97,7 @@ func TestClassifySageRoute(t *testing.T) {
 		{name: "ack direct", input: "sounds good", wantDirect: true, wantReason: "acknowledgement"},
 		{name: "preference direct", input: "I like when you use emoji a little more", wantDirect: true, wantReason: "conversation"},
 		{name: "voice feedback direct", input: "huh that did not sound like Sage :(", wantDirect: true, wantReason: "voice_feedback"},
+		{name: "story direct", input: "tell me a story", wantDirect: true, wantReason: "casual_creative"},
 		{name: "fix delegates", input: "fix the chat session delete route", wantDirect: false, wantReason: "work_request"},
 		{name: "soul provenance delegates", input: "where is your SOUL.md coming from?", wantDirect: false, wantReason: "system_or_runtime"},
 		{name: "docker delegates", input: "look into the Docker compose networking", wantDirect: false, wantReason: "work_request"},

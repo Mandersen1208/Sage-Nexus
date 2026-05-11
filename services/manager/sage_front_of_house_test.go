@@ -44,3 +44,34 @@ func TestLoadSageSystemPromptFallsBackToBundledPrompt(t *testing.T) {
 		t.Fatalf("expected bundled source, got %q", source)
 	}
 }
+
+func TestAutoFallbackWorkerIDPrefersProjectManager(t *testing.T) {
+	runner := &SageRunner{Orchestrator: &SageOrchestratorAgent{Workers: map[string]*CopilotAgent{
+		defaultSageAutoFallbackWorkerID: {BaseAgent: BaseAgent{AgentID: defaultSageAutoFallbackWorkerID}},
+		"AGT-research-agent":            {BaseAgent: BaseAgent{AgentID: "AGT-research-agent"}},
+	}}}
+
+	if got := runner.autoFallbackWorkerID(); got != defaultSageAutoFallbackWorkerID {
+		t.Fatalf("autoFallbackWorkerID() = %q, want %q", got, defaultSageAutoFallbackWorkerID)
+	}
+}
+
+func TestAutoFallbackWorkerIDFallsBackToAnyAvailableWorker(t *testing.T) {
+	runner := &SageRunner{Orchestrator: &SageOrchestratorAgent{Workers: map[string]*CopilotAgent{
+		"AGT-research-agent": {BaseAgent: BaseAgent{AgentID: "AGT-research-agent"}},
+	}}}
+
+	if got := runner.autoFallbackWorkerID(); got != "AGT-research-agent" {
+		t.Fatalf("autoFallbackWorkerID() = %q, want AGT-research-agent", got)
+	}
+}
+
+func TestWrapDelegatedReplyAddsSageVoiceAroundArtifact(t *testing.T) {
+	wrapped := wrapDelegatedReply("```yaml\nmode: auto\n```")
+	if wrapped == "```yaml\nmode: auto\n```" {
+		t.Fatal("wrapDelegatedReply() returned raw artifact without Sage wrapper")
+	}
+	if got := wrapped; got == "" {
+		t.Fatal("wrapDelegatedReply() returned empty string")
+	}
+}

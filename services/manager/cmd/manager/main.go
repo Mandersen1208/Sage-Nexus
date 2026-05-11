@@ -200,6 +200,7 @@ func main() {
 	redisAddr := sageagents.GetEnvOr("REDIS_ADDR", "redis:6379")
 	ctFile := sageagents.GetEnvOr("ACP_CT_FILE", "")
 	ctEnv := os.Getenv("ACP_CAPABILITY_TOKEN")
+	codexBridgeURL := strings.TrimSpace(os.Getenv("CODEX_BRIDGE_URL"))
 	ctx := context.Background()
 
 	// ── Config + system prompt ───────────────────────────────────────────────
@@ -254,6 +255,7 @@ func main() {
 			ToolCatalog:  mcpToolCatalog,
 		}
 		w.SetStateDir(stateDir)
+		w.SetCodexBridge(codexBridgeURL, true)
 		if prompt != "" {
 			log.Printf("Loaded system prompt for %s (%d chars, model=%s)", id, len(prompt), w.ActiveModel())
 		}
@@ -285,6 +287,9 @@ func main() {
 		SystemPrompt: systemPrompt,
 	}
 	orchestrator.SetStateDir(stateDir)
+	if orchestrator.LLM() != nil {
+		orchestrator.LLM().SetCodexBridge(codexBridgeURL, true)
+	}
 	registerInProcessAgents(ctx, mgr, orchestrator, workers)
 
 	keyFile := sageagents.GetEnvOr("AGENT_KEY_FILE", "/data/agent.key")
@@ -410,6 +415,9 @@ func main() {
 	if os.Getenv("SAGE_FRONT_OF_HOUSE_ENABLED") == "true" {
 		sessionStore := sageagents.NewRedisSessionStore(rc, sessionTTLHours)
 		sageRunner = sageagents.NewSageRunner(cfg, orchestrator, sessionStore, stateDir)
+		if sageRunner.Sage != nil {
+			sageRunner.Sage.SetCodexBridge(codexBridgeURL, true)
+		}
 		log.Printf("Sage front-of-house ENABLED (capability=%s, ttl=%dh)", sageagents.SageFrontOfHouseCapability, sessionTTLHours)
 	} else {
 		log.Printf("Sage front-of-house disabled — set SAGE_FRONT_OF_HOUSE_ENABLED=true to enable")
@@ -501,7 +509,7 @@ func main() {
 	})
 
 	// /orchestrator/errors — cross-request error memory.
-	registerProviderAuthRoutes(mux, stateDir)
+	registerProviderAuthRoutes(mux, stateDir, codexBridgeURL)
 	mux.HandleFunc("/orchestrator/errors", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1366,7 +1374,7 @@ func bearerToken(r *http.Request) string {
 	return ""
 }
 
-func registerProviderAuthRoutes(mux *http.ServeMux, stateDir string) {
+func registerProviderAuthRoutes(mux *http.ServeMux, stateDir, codexBridgeURL string) {
 	mux.HandleFunc("/providers/copilot/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "GET only", http.StatusMethodNotAllowed)
@@ -1454,6 +1462,16 @@ func registerProviderAuthRoutes(mux *http.ServeMux, stateDir string) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(sageagents.CopilotAuthState(stateDir))
+	})
+
+	mux.HandleFunc("/providers/codex/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		status := sageagents.NewCodexBridgeClient(codexBridgeURL).Status(r.Context(), sageagents.DefaultCodexModel)
+		json.NewEncoder(w).Encode(status)
 	})
 }
 

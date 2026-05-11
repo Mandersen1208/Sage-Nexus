@@ -3,6 +3,7 @@
   "toolBundles": {
     "budget": [
       "budget_get_current_month",
+      "budget_get_month_checkup",
       "budget_get_month",
       "budget_get_month_transactions",
       "budget_get_spend_by_category",
@@ -338,8 +339,12 @@
         "auto": "Sage Auto",
         "solo": "Sage Only"
       },
+      "modeDescriptions": {
+        "auto": "Sage Auto sends the turn through the manager/orchestrator.",
+        "solo": "Direct chat with Sage as a persona; worker routing stays off."
+      },
       "routable": false,
-      "model": "gpt-4.1",
+      "model": "codex/gpt-5.5",
       "systemPromptFile": "../prompts/sage.md",
       "seniorGate": "off"
     }
