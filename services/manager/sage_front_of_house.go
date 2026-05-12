@@ -1,4 +1,4 @@
-// sage_front_of_house.go - AGT-sage as the user-facing voice in front of
+// Package sageagents sage_front_of_house.go - AGT-sage as the user-facing voice in front of
 // the manager's worker mesh.
 package sageagents
 
@@ -91,15 +91,13 @@ func loadSageSystemPrompt(cfg *AgentsConfig) (string, string) {
 	if soulPath == "" {
 		soulPath = defaultSageSoulPath
 	}
-	if soulPath != "" {
-		b, err := os.ReadFile(soulPath)
-		if err != nil {
-			log.Printf("Warning: could not read Sage SOUL.md at %s: %v; falling back to bundled prompt", soulPath, err)
-		} else if strings.TrimSpace(string(b)) == "" {
-			log.Printf("Warning: Sage SOUL.md at %s is empty; falling back to bundled prompt", soulPath)
-		} else {
-			return string(b), soulPath
-		}
+	b, err := os.ReadFile(soulPath)
+	if err != nil {
+		log.Printf("Warning: could not read Sage SOUL.md at %s: %v; falling back to bundled prompt", soulPath, err)
+	} else if strings.TrimSpace(string(b)) == "" {
+		log.Printf("Warning: Sage SOUL.md at %s is empty; falling back to bundled prompt", soulPath)
+	} else {
+		return string(b), soulPath
 	}
 
 	prompt, err := cfg.SystemPrompt(SageAgentID)
