@@ -44,6 +44,7 @@ func TestRequiresSeniorGateForRequest(t *testing.T) {
 		want     bool
 	}{
 		{name: "frontend implementation gated", workerID: "AGT-frontend-dev-agent", query: "implement the mobile chat layout", want: true},
+		{name: "application creation gated", workerID: "AGT-frontend-dev-agent", query: "make me an application", want: true},
 		{name: "backend fix gated", workerID: "AGT-backend-dev-agent", query: "fix the session delete route", want: true},
 		{name: "devops deploy gated", workerID: "AGT-devops-agent", query: "deploy the compose update", want: true},
 		{name: "architect document gated", workerID: "AGT-architect-agent", query: "create an architecture document", want: true},
@@ -61,6 +62,41 @@ func TestRequiresSeniorGateForRequest(t *testing.T) {
 				t.Fatalf("requiresSeniorGateForRequest(%q, %q) = %v, want %v", tc.workerID, tc.query, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRequiresOrchestratorWorkerRoute(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "application creation", input: "make me an application", want: true},
+		{name: "wrapped current request", input: "Recent chat context:\n- talked about apps\n\nCurrent user request:\nmake me an application", want: true},
+		{name: "work command", input: "fix the chat route", want: true},
+		{name: "casual chat", input: "hey sage", want: false},
+		{name: "read only question", input: "what makes Redis useful?", want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := requiresOrchestratorWorkerRoute(tc.input); got != tc.want {
+				t.Fatalf("requiresOrchestratorWorkerRoute(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldRejectDirectOrchestratorReply(t *testing.T) {
+	if !shouldRejectDirectOrchestratorReply("make me an application", nil) {
+		t.Fatal("route-required request without route trace should be rejected")
+	}
+	if shouldRejectDirectOrchestratorReply("make me an application", []string{"call_frontend_dev_agent"}) {
+		t.Fatal("route-required request with route trace should not be rejected")
+	}
+	if shouldRejectDirectOrchestratorReply("hey sage", nil) {
+		t.Fatal("casual direct response should be allowed")
 	}
 }
 

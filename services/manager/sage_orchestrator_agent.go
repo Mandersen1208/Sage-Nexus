@@ -269,6 +269,10 @@ func (a *SageOrchestratorAgent) Orchestrate(ctx context.Context, input string, t
 	if a.SystemPrompt != "" {
 		messages = append(messages, ChatMessage{Role: "system", Content: a.SystemPrompt})
 	}
+	routeRequired := requiresOrchestratorWorkerRoute(input)
+	if routeRequired {
+		messages = append(messages, ChatMessage{Role: "system", Content: requiredWorkerRouteInstruction(input)})
+	}
 	messages = append(messages, ChatMessage{Role: "user", Content: input})
 
 	start := time.Now()
@@ -278,7 +282,30 @@ func (a *SageOrchestratorAgent) Orchestrate(ctx context.Context, input string, t
 	}
 	reply, err := a.llm.ChatWithLocalTools(ctx, messages, routeTools, a.makeRouterExec(ctx, input, tracker))
 	EmitLatencySpan(ctx, "orchestrator_route_model", start)
-	return reply, err
+	if err != nil {
+		return reply, err
+	}
+	if !shouldRejectDirectOrchestratorReply(input, a.LastRouterTrace()) {
+		return reply, nil
+	}
+
+	AppendWorkContextEvent(ctx, "orchestrator_route_retry", a.AgentID, "Direct orchestrator reply rejected for route-required request", reply, map[string]interface{}{
+		"route_required": routeRequired,
+	})
+	retryMessages := append([]ChatMessage{}, messages...)
+	retryMessages = append(retryMessages, ChatMessage{Role: "assistant", Content: reply})
+	retryMessages = append(retryMessages, ChatMessage{Role: "user", Content: "The previous response did not satisfy the Auto routing contract. This request requires manager/orchestrator execution through route tools. Do not answer directly. Call the appropriate route tool now, using the original request as the worker query."})
+
+	retryStart := time.Now()
+	retryReply, retryErr := a.llm.ChatWithLocalTools(ctx, retryMessages, routeTools, a.makeRouterExec(ctx, input, tracker))
+	EmitLatencySpan(ctx, "orchestrator_route_model_retry", retryStart)
+	if retryErr != nil {
+		return retryReply, retryErr
+	}
+	if shouldRejectDirectOrchestratorReply(input, a.LastRouterTrace()) {
+		return retryReply, fmt.Errorf("orchestrator returned a direct answer for a route-required request; no worker route tool was called")
+	}
+	return retryReply, nil
 }
 
 // Resume continues an orchestration that was paused via RoundCapReachedError.
@@ -545,9 +572,12 @@ func (a *SageOrchestratorAgent) requiresSeniorGateForRequest(workerID, query str
 }
 
 func isDeliveryWorkRequest(query string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(query))
+	normalized := normalizeRouteRequest(query)
 	if normalized == "" {
 		return false
+	}
+	if isApplicationCreationRequest(normalized) {
+		return true
 	}
 	deliveryTerms := []string{
 		"add",
@@ -587,6 +617,51 @@ func isDeliveryWorkRequest(query string) bool {
 		return true
 	}
 	return false
+}
+
+func shouldRejectDirectOrchestratorReply(input string, routeTrace []string) bool {
+	return requiresOrchestratorWorkerRoute(input) && len(routeTrace) == 0
+}
+
+func requiresOrchestratorWorkerRoute(input string) bool {
+	return isDeliveryWorkRequest(input)
+}
+
+func requiredWorkerRouteInstruction(input string) string {
+	return "This user request requires manager/orchestrator execution through worker route tools. " +
+		"Do not answer directly from orchestrator knowledge. Call the appropriate route tool before producing any final response. " +
+		"Original request: " + normalizeRouteRequest(input)
+}
+
+func normalizeRouteRequest(query string) string {
+	normalized := strings.ToLower(strings.TrimSpace(query))
+	markers := []string{
+		"current user request:",
+		"current request:",
+	}
+	for _, marker := range markers {
+		if idx := strings.LastIndex(normalized, marker); idx >= 0 {
+			return strings.TrimSpace(normalized[idx+len(marker):])
+		}
+	}
+	return normalized
+}
+
+func isApplicationCreationRequest(normalized string) bool {
+	return containsAny(normalized, []string{
+		"make me an application",
+		"make me an app",
+		"make me a web app",
+		"make me a website",
+		"make me a dashboard",
+		"make me a tool",
+		"make an application",
+		"make an app",
+		"make a web app",
+		"make a website",
+		"make a dashboard",
+		"make a tool",
+	})
 }
 
 func containsAnyWord(s string, terms []string) bool {

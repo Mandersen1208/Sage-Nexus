@@ -409,8 +409,9 @@ func main() {
 	// Optional, gated by SAGE_FRONT_OF_HOUSE_ENABLED. When on, inbound tasks
 	// with capability acp:cap:skill.sage-front-of-house are routed through
 	// AGT-sage (SOUL.md voice + multi-turn memory). She delegates to the
-	// orchestrator via the call_orchestrator local tool. When off, behavior
-	// is identical to before — orchestrator handles every task directly.
+	// orchestrator via the call_orchestrator local tool. When off, non-chat
+	// dispatch can still route directly; Sage Auto chat fails loudly rather
+	// than returning manager prose as Sage.
 	var sageRunner *sageagents.SageRunner
 	if os.Getenv("SAGE_FRONT_OF_HOUSE_ENABLED") == "true" {
 		sessionStore := sageagents.NewRedisSessionStore(rc, sessionTTLHours)
@@ -1799,6 +1800,97 @@ func persistDispatchRollingTurn(
 	store.Trim(ctx, task.ContextID, envIntOr("MANAGER_DISPATCH_ROLLING_MAX_MESSAGES", 12))
 }
 
+func runSageAutoManagerExecution(
+	ctx context.Context,
+	sage *sageagents.SageRunner,
+	orch *sageagents.SageOrchestratorAgent,
+	task inboundTask,
+	orchestrationInput string,
+	tracker *sageagents.HandoffTracker,
+) (string, error) {
+	log.Printf("  Manager executing Sage Auto [%s] via orchestrator input=%.120q", task.TaskID, orchestrationInput)
+	sageagents.EmitProgress(ctx, sageagents.ProgressEvent{
+		Type:        "route",
+		Agent:       sageagents.SageAgentID,
+		Tool:        "call_orchestrator",
+		Phase:       "start",
+		Mode:        "delegate",
+		RouteReason: "sage_auto_manager_execution",
+		Timestamp:   time.Now().Unix(),
+	})
+	start := time.Now()
+	rawResult, execErr := orch.Orchestrate(ctx, orchestrationInput, tracker)
+	sageagents.EmitLatencySpan(ctx, "orchestrator_total", start)
+	emitSageAutoManagerExecutionEnd(ctx, rawResult, execErr, start)
+	return finalizeSageAutoManagerExecution(ctx, sage, orch, task, rawResult, execErr, tracker)
+}
+
+func resumeSageAutoManagerExecution(
+	ctx context.Context,
+	sage *sageagents.SageRunner,
+	orch *sageagents.SageOrchestratorAgent,
+	task inboundTask,
+	prevMessages []sageagents.ChatMessage,
+	originalInput, note string,
+	tracker *sageagents.HandoffTracker,
+) (string, error) {
+	start := time.Now()
+	rawResult, execErr := orch.Resume(ctx, prevMessages, tracker, originalInput, note)
+	sageagents.EmitLatencySpan(ctx, "orchestrator_resume", start)
+	emitSageAutoManagerExecutionEnd(ctx, rawResult, execErr, start)
+	return finalizeSageAutoManagerExecution(ctx, sage, orch, task, rawResult, execErr, tracker)
+}
+
+func emitSageAutoManagerExecutionEnd(ctx context.Context, rawResult string, execErr error, start time.Time) {
+	duration := time.Since(start).Round(time.Millisecond)
+	event := sageagents.ProgressEvent{
+		Type:        "route",
+		Agent:       sageagents.SageAgentID,
+		Tool:        "call_orchestrator",
+		Phase:       "end",
+		Mode:        "delegate",
+		RouteReason: "sage_auto_manager_execution",
+		DurationMS:  duration.Milliseconds(),
+		Timestamp:   time.Now().Unix(),
+	}
+	if execErr != nil {
+		event.Error = execErr.Error()
+	}
+	sageagents.EmitProgress(ctx, event)
+	log.Printf("  Manager Sage Auto execution finished (%s) rawLen=%d err=%v", duration, len(rawResult), execErr)
+}
+
+func finalizeSageAutoManagerExecution(
+	ctx context.Context,
+	sage *sageagents.SageRunner,
+	orch *sageagents.SageOrchestratorAgent,
+	task inboundTask,
+	rawResult string,
+	execErr error,
+	tracker *sageagents.HandoffTracker,
+) (string, error) {
+	var capErr *sageagents.RoundCapReachedError
+	if errors.As(execErr, &capErr) {
+		return rawResult, execErr
+	}
+
+	sourceResult := rawResult
+	if managerEnvBool("SAGE_DELEGATED_PREFER_WORKER_REPLY", true) {
+		if workerReply := strings.TrimSpace(orch.LastReply()); workerReply != "" {
+			sourceResult = workerReply
+		}
+	}
+	executionResult := sage.BuildManagerExecutionResult(task.ContextID, task.TaskID, sourceResult, execErr, tracker)
+	final, finalErr := sage.CompleteAutoFromManagerResult(ctx, task.ContextID, task.Content, executionResult, tracker)
+	if finalErr != nil {
+		return final, finalErr
+	}
+	if execErr != nil {
+		return final, execErr
+	}
+	return final, nil
+}
+
 // handleTask is the Redis-driven entry point. It runs the same pipeline as
 // /dispatch via runTask, then logs and discards the response (the response
 // is delivered to Sage entirely through sage:events).
@@ -1949,8 +2041,8 @@ func runTask(
 	// ── Orchestrate (with input-required pause/resume support) ──────────────
 	// Dispatch path:
 	//   - Sage front-of-house ON + capability matches → AGT-sage drives the
-	//     turn (loads session, calls the orchestrator directly, optionally
-	//     re-voices reply, persists to session).
+	//     entry/session context. The manager still calls the orchestrator, then
+	//     hands the structured execution result back to Sage for finalization.
 	//   - Otherwise → orchestrator directly (existing behavior).
 	tracker := sageagents.NewHandoffTracker()
 	oStart := time.Now()
@@ -1996,7 +2088,13 @@ func runTask(
 	case useSage:
 		log.Printf("  Routing [%s] through AGT-sage (contextID=%s)", task.TaskID, task.ContextID)
 		sageagents.AppendWorkContextEvent(ctx, "route_decision", "manager", "Task routed through Sage front-of-house", "", map[string]interface{}{"agent": sageagents.SageAgentID})
-		result, err = sage.Run(ctx, task.ContextID, orchestrationInput, tracker)
+		orchestrationInput, err = sage.BuildAutoOrchestrationInput(ctx, task.ContextID, orchestrationInput, tracker)
+		if err != nil {
+			break
+		}
+		result, err = runSageAutoManagerExecution(ctx, sage, orch, task, orchestrationInput, tracker)
+	case agentMode == sageagents.ChatModeAuto && task.Source == "local-chat":
+		err = fmt.Errorf("Sage Auto requires Sage front-of-house to be initialized")
 	default:
 		if agentMode != sageagents.ChatModeAuto {
 			err = fmt.Errorf("unsupported chat mode %q", agentMode)
@@ -2083,6 +2181,9 @@ func runTask(
 			// Finalize with whatever partial work we've gathered.
 			result = orch.LastReply()
 			err = nil
+			if useSage {
+				result, err = finalizeSageAutoManagerExecution(ctx, sage, orch, task, result, nil, tracker)
+			}
 			log.Printf("  Orchestrate ⏹ [%s] stopped by user; finalizing with partial reply (%d chars)", task.TaskID, len(result))
 			break
 		}
@@ -2093,7 +2194,7 @@ func runTask(
 		log.Printf("  Orchestrate ▶ [%s] resuming on user confirmation; note=%q  (sage=%v)", task.TaskID, truncateNote(cm.Note, 80), useSage)
 		sageagents.AppendWorkContextEvent(ctx, "continuation_continue", "manager", "Human continued task", cm.Note, nil)
 		if useSage {
-			result, err = sage.Resume(ctx, capErr.Messages, tracker, orchestrationInput, cm.Note)
+			result, err = resumeSageAutoManagerExecution(ctx, sage, orch, task, capErr.Messages, orchestrationInput, cm.Note, tracker)
 		} else {
 			result, err = orch.Resume(ctx, capErr.Messages, tracker, orchestrationInput, cm.Note)
 		}
@@ -2141,6 +2242,9 @@ finalize:
 		}
 		reply.Status = "error"
 		reply.Error = err.Error()
+		if useSage && strings.TrimSpace(result) != "" {
+			reply.Error = result
+		}
 	} else {
 		log.Printf("  Orchestrate ✓ [%s] (%s) worker=%s replyLen=%d", task.TaskID, oDur, orch.LastWorker(), len(result))
 		if result != "" {

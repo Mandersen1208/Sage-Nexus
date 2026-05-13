@@ -5,6 +5,7 @@ package sageagents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -13,6 +14,7 @@ import (
 )
 
 const defaultSageSoulPath = "/home/node/.openclaw/workspace/SOUL.md"
+const defaultSageAutoFallbackWorkerID = "AGT-project-manager-agent"
 
 // SageFrontOfHouseCapability is the ACP capability inbound tasks must declare
 // to be routed through Sage. Local chat can also force this route by source.
@@ -115,6 +117,26 @@ func (r *SageRunner) Run(
 	contextID, userInput string,
 	tracker *HandoffTracker,
 ) (string, error) {
+	query, err := r.BuildAutoOrchestrationInput(ctx, contextID, userInput, tracker)
+	if err != nil {
+		return "", err
+	}
+	reply, err := r.runDelegated(ctx, contextID, userInput, query, tracker)
+	if err != nil {
+		return reply, err
+	}
+	r.persistAutoTurn(ctx, contextID, userInput, reply, tracker)
+	return reply, nil
+}
+
+// BuildAutoOrchestrationInput prepares Sage Auto's entry context without
+// running the manager/orchestrator. The manager remains responsible for the
+// execution call; Sage owns chat continuity and final response composition.
+func (r *SageRunner) BuildAutoOrchestrationInput(
+	ctx context.Context,
+	contextID, userInput string,
+	tracker *HandoffTracker,
+) (string, error) {
 	if r == nil || r.Sage == nil || r.Orchestrator == nil {
 		return "", fmt.Errorf("SageRunner not initialized")
 	}
@@ -150,23 +172,40 @@ func (r *SageRunner) Run(
 		}
 	}
 
-	userMsg := ChatMessage{Role: "user", Content: userInput}
-	reply, err := r.runDelegated(ctx, prior, userInput, decision, tracker)
+	return buildDelegatedQuery(prior, userInput), nil
+}
+
+// CompleteAutoFromManagerResult is Sage Auto's exit boundary. It finalizes a
+// manager execution package and records the completed Sage turn.
+func (r *SageRunner) CompleteAutoFromManagerResult(
+	ctx context.Context,
+	contextID, originalUserMessage string,
+	result ManagerExecutionResult,
+	tracker *HandoffTracker,
+) (string, error) {
+	reply, err := r.ComposeFinalFromManagerResult(ctx, originalUserMessage, result)
 	if err != nil {
 		return reply, err
 	}
+	r.persistAutoTurn(ctx, contextID, originalUserMessage, reply, tracker)
+	return reply, nil
+}
 
+func (r *SageRunner) persistAutoTurn(ctx context.Context, contextID, userInput, reply string, tracker *HandoffTracker) {
+	userMsg := ChatMessage{Role: "user", Content: userInput}
 	r.persistTurn(ctx, contextID, userMsg, reply)
-
 	if tracker != nil {
+		model := ""
+		if r != nil && r.Sage != nil {
+			model = r.Sage.ActiveModel()
+		}
 		tracker.Add(AgentHandoff{
 			AgentID: SageAgentID,
 			Role:    "front-of-house",
-			Model:   r.Sage.ActiveModel(),
+			Model:   model,
 			Reply:   reply,
 		})
 	}
-	return reply, nil
 }
 
 func (r *SageRunner) RunSolo(
@@ -229,32 +268,201 @@ func (r *SageRunner) runDirect(ctx context.Context, messages []ChatMessage, deci
 
 func (r *SageRunner) runDelegated(
 	ctx context.Context,
-	prior []ChatMessage,
+	contextID string,
 	userInput string,
-	decision sageRouteDecision,
+	query string,
 	tracker *HandoffTracker,
 ) (string, error) {
-	query := buildDelegatedQuery(prior, userInput)
-	log.Printf("  [%s] delegate -> orchestrator reason=%s query=%q", SageAgentID, decision.Reason, truncate(query, 120))
-	EmitProgress(ctx, ProgressEvent{Type: "route", Agent: SageAgentID, Tool: "call_orchestrator", Phase: "start", Mode: "delegate", RouteReason: decision.Reason, Timestamp: time.Now().Unix()})
+	reason := "sage_auto_routes_to_orchestrator"
+	log.Printf("  [%s] delegate -> orchestrator reason=%s query=%q", SageAgentID, reason, truncate(query, 120))
+	EmitProgress(ctx, ProgressEvent{Type: "route", Agent: SageAgentID, Tool: "call_orchestrator", Phase: "start", Mode: "delegate", RouteReason: reason, Timestamp: time.Now().Unix()})
 	start := time.Now()
 	out, err := r.Orchestrator.Orchestrate(ctx, query, tracker)
 	EmitLatencySpan(ctx, "orchestrator_total", start)
 	dur := time.Since(start).Round(time.Millisecond)
 	if err != nil {
 		log.Printf("  [%s] orchestrator failed (%s): %v", SageAgentID, dur, err)
-		EmitProgress(ctx, ProgressEvent{Type: "route", Agent: SageAgentID, Tool: "call_orchestrator", Phase: "end", Mode: "delegate", RouteReason: decision.Reason, DurationMS: dur.Milliseconds(), Error: err.Error(), Timestamp: time.Now().Unix()})
-		return out, err
+		EmitProgress(ctx, ProgressEvent{Type: "route", Agent: SageAgentID, Tool: "call_orchestrator", Phase: "end", Mode: "delegate", RouteReason: reason, DurationMS: dur.Milliseconds(), Error: err.Error(), Timestamp: time.Now().Unix()})
+		var capErr *RoundCapReachedError
+		if errors.As(err, &capErr) {
+			return out, err
+		}
+		final, finalErr := r.ComposeFinalFromManagerResult(ctx, userInput, r.managerExecutionResult(contextID, out, err, tracker))
+		if finalErr != nil {
+			return final, finalErr
+		}
+		return final, err
 	}
 	log.Printf("  [%s] orchestrator ok (%s) replyLen=%d", SageAgentID, dur, len(out))
-	EmitProgress(ctx, ProgressEvent{Type: "route", Agent: SageAgentID, Tool: "call_orchestrator", Phase: "end", Mode: "delegate", RouteReason: decision.Reason, DurationMS: dur.Milliseconds(), Timestamp: time.Now().Unix()})
+	EmitProgress(ctx, ProgressEvent{Type: "route", Agent: SageAgentID, Tool: "call_orchestrator", Phase: "end", Mode: "delegate", RouteReason: reason, DurationMS: dur.Milliseconds(), Timestamp: time.Now().Unix()})
 	managerReply := out
 	if envBool("SAGE_DELEGATED_PREFER_WORKER_REPLY", true) {
 		if workerReply := strings.TrimSpace(r.Orchestrator.LastReply()); workerReply != "" {
 			managerReply = workerReply
 		}
 	}
-	return r.applyDelegatedRevoice(ctx, userInput, managerReply)
+	return r.ComposeFinalFromManagerResult(ctx, userInput, r.managerExecutionResult(contextID, managerReply, nil, tracker))
+}
+
+func (r *SageRunner) BuildManagerExecutionResult(contextID, taskID, rawResult string, err error, tracker *HandoffTracker) ManagerExecutionResult {
+	result := r.managerExecutionResult(contextID, rawResult, err, tracker)
+	result.TaskID = taskID
+	return result
+}
+
+func (r *SageRunner) managerExecutionResult(contextID, rawResult string, err error, tracker *HandoffTracker) ManagerExecutionResult {
+	kind := ExecutionAgentic
+	if err != nil {
+		kind = ExecutionError
+	} else if r == nil || r.Orchestrator == nil || strings.TrimSpace(r.Orchestrator.LastWorker()) == "" {
+		kind = ExecutionDirect
+	}
+
+	result := ManagerExecutionResult{
+		Kind:              kind,
+		ContextID:         contextID,
+		RawResult:         rawResult,
+		RecommendedReply:  rawResult,
+		RequiresSageFinal: true,
+	}
+	if err != nil {
+		result.Error = err.Error()
+	}
+	if r != nil && r.Orchestrator != nil {
+		result.WorkerAgentID = r.Orchestrator.LastWorker()
+		result.ToolCalls = uniqueNonEmptyStrings(append(r.Orchestrator.LastRouterTrace(), r.Orchestrator.LastWorkerToolTrace()...))
+	}
+	result.WorkerChain = workerChainFromTracker(tracker)
+	return result
+}
+
+func (r *SageRunner) autoFallbackWorkerID() string {
+	if r == nil || r.Orchestrator == nil {
+		return ""
+	}
+	if worker := r.Orchestrator.Workers[defaultSageAutoFallbackWorkerID]; worker != nil {
+		return defaultSageAutoFallbackWorkerID
+	}
+	for id, worker := range r.Orchestrator.Workers {
+		if strings.TrimSpace(id) != "" && worker != nil {
+			return id
+		}
+	}
+	return ""
+}
+
+func workerChainFromTracker(tracker *HandoffTracker) []string {
+	if tracker == nil {
+		return nil
+	}
+	chain := []string{}
+	for _, handoff := range tracker.Handoffs() {
+		switch handoff.Role {
+		case "worker", "review_gate":
+			chain = append(chain, handoff.AgentID)
+		}
+	}
+	return uniqueNonEmptyStrings(chain)
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+// ComposeFinalFromManagerResult is the Sage Auto exit boundary. Manager output
+// is treated as evidence/source material; Sage owns the final chat response.
+func (r *SageRunner) ComposeFinalFromManagerResult(
+	ctx context.Context,
+	originalUserMessage string,
+	result ManagerExecutionResult,
+) (string, error) {
+	if !result.RequiresSageFinal {
+		return strings.TrimSpace(firstNonEmpty(result.RecommendedReply, result.RawResult, result.Error)), nil
+	}
+
+	messages, err := r.buildSageFinalizationMessages(originalUserMessage, result)
+	if err != nil {
+		return sageFinalizationFallback(result, err), nil
+	}
+
+	start := time.Now()
+	reply, err := r.Sage.Chat(ctx, messages)
+	EmitLatencySpan(ctx, "sage_auto_finalization", start)
+	dur := time.Since(start).Round(time.Millisecond)
+	if err != nil {
+		log.Printf("  [%s] finalization failed (%s): %v", SageAgentID, dur, err)
+		return sageFinalizationFallback(result, err), nil
+	}
+	reply = strings.TrimSpace(reply)
+	if reply == "" {
+		return sageFinalizationFallback(result, fmt.Errorf("Sage finalization returned empty output")), nil
+	}
+	log.Printf("  [%s] finalization ok (%s) replyLen=%d", SageAgentID, dur, len(reply))
+	return reply, nil
+}
+
+func (r *SageRunner) buildSageFinalizationMessages(originalUserMessage string, result ManagerExecutionResult) ([]ChatMessage, error) {
+	if r == nil || r.Sage == nil {
+		return nil, fmt.Errorf("SageRunner not initialized")
+	}
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode manager execution result: %w", err)
+	}
+
+	messages := []ChatMessage{}
+	if strings.TrimSpace(r.Sage.SystemPrompt) != "" {
+		messages = append(messages, ChatMessage{Role: "system", Content: r.Sage.SystemPrompt})
+	}
+	messages = append(messages, ChatMessage{
+		Role: "system",
+		Content: "Sage Auto communication chain: Sage is the entry and exit interface. " +
+			"The manager handles routing and execution. Compose the final user-facing response in Sage voice using the manager execution result as source material. " +
+			"Preserve all facts, file paths, commands, code blocks, tables, artifacts, warnings, errors, and next steps. Keep copyable artifacts intact. " +
+			"Do not claim to be the manager or router. Do not restart execution, call tools, or invent missing work. " +
+			"If the result is paused or failed, say so clearly and give the next useful step.",
+	})
+	messages = append(messages, ChatMessage{
+		Role: "user",
+		Content: "Original user request:\n" + strings.TrimSpace(originalUserMessage) +
+			"\n\nManager execution result:\n" + string(encoded) +
+			"\n\nReturn only the final response to the user.",
+	})
+	return messages, nil
+}
+
+func sageFinalizationFallback(result ManagerExecutionResult, cause error) string {
+	switch result.Kind {
+	case ExecutionError:
+		detail := firstNonEmpty(result.Error, errorText(cause))
+		return "I hit a manager-side failure before I could finish that cleanly. The useful error is: " + detail
+	case ExecutionPaused:
+		reason := firstNonEmpty(result.PausedReason, "the manager paused before completion")
+		return "I paused this instead of pretending it finished. Reason: " + reason
+	default:
+		detail := firstNonEmpty(errorText(cause), "unknown finalization error")
+		return "I got the manager's execution result, but I could not complete the Sage final response cleanly: " + detail + ". The task telemetry still has the execution details."
+	}
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func shouldRevoiceDelegated() bool {
@@ -557,9 +765,17 @@ func (r *SageRunner) Resume(
 	reply, err := r.Orchestrator.Resume(ctx, prevMessages, tracker, originalInput, note)
 	EmitLatencySpan(ctx, "orchestrator_resume", start)
 	if err != nil {
-		return reply, err
+		var capErr *RoundCapReachedError
+		if errors.As(err, &capErr) {
+			return reply, err
+		}
+		final, finalErr := r.ComposeFinalFromManagerResult(ctx, originalInput, r.managerExecutionResult("", reply, err, tracker))
+		if finalErr != nil {
+			return final, finalErr
+		}
+		return final, err
 	}
-	return r.applyDelegatedRevoice(ctx, originalInput, reply)
+	return r.ComposeFinalFromManagerResult(ctx, originalInput, r.managerExecutionResult("", reply, nil, tracker))
 }
 
 func classifySageRoute(input string) sageRouteDecision {
