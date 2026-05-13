@@ -20,6 +20,7 @@ Sage Nexus keeps the current Sage shape:
 - Daily source sync at local `2:00 AM` plus manual sync endpoints/actions.
 - `/dispatch` session-based rolling short-term memory window for manager chat/tool drafting flows.
 - Delegated reply pass-through defaults that preserve worker output fidelity.
+- Copilot live model deltas stream into the chat page's bottom Live output box while final artifacts remain the persisted response.
 
 ## Current Defaults
 

@@ -289,23 +289,10 @@ func (a *SageOrchestratorAgent) Orchestrate(ctx context.Context, input string, t
 		return reply, nil
 	}
 
-	AppendWorkContextEvent(ctx, "orchestrator_route_retry", a.AgentID, "Direct orchestrator reply rejected for route-required request", reply, map[string]interface{}{
+	AppendWorkContextEvent(ctx, "orchestrator_route_fallback", a.AgentID, "Direct orchestrator reply rejected; using deterministic worker fallback", reply, map[string]interface{}{
 		"route_required": routeRequired,
 	})
-	retryMessages := append([]ChatMessage{}, messages...)
-	retryMessages = append(retryMessages, ChatMessage{Role: "assistant", Content: reply})
-	retryMessages = append(retryMessages, ChatMessage{Role: "user", Content: "The previous response did not satisfy the Auto routing contract. This request requires manager/orchestrator execution through route tools. Do not answer directly. Call the appropriate route tool now, using the original request as the worker query."})
-
-	retryStart := time.Now()
-	retryReply, retryErr := a.llm.ChatWithLocalTools(ctx, retryMessages, routeTools, a.makeRouterExec(ctx, input, tracker))
-	EmitLatencySpan(ctx, "orchestrator_route_model_retry", retryStart)
-	if retryErr != nil {
-		return retryReply, retryErr
-	}
-	if shouldRejectDirectOrchestratorReply(input, a.LastRouterTrace()) {
-		return retryReply, fmt.Errorf("orchestrator returned a direct answer for a route-required request; no worker route tool was called")
-	}
-	return retryReply, nil
+	return a.dispatchRequiredRouteFallback(ctx, input, tracker)
 }
 
 // Resume continues an orchestration that was paused via RoundCapReachedError.
@@ -623,6 +610,52 @@ func shouldRejectDirectOrchestratorReply(input string, routeTrace []string) bool
 	return requiresOrchestratorWorkerRoute(input) && len(routeTrace) == 0
 }
 
+func (a *SageOrchestratorAgent) dispatchRequiredRouteFallback(ctx context.Context, input string, tracker *HandoffTracker) (string, error) {
+	workerID := a.fallbackRouteWorkerID()
+	if workerID == "" {
+		return "", fmt.Errorf("route-required request had no available fallback worker")
+	}
+	routeTool := a.routeToolNameForWorker(workerID)
+	AppendWorkContextEvent(ctx, "orchestrator_route", a.AgentID, "Orchestrator selected deterministic fallback worker", "", map[string]interface{}{
+		"tool":     routeTool,
+		"worker":   workerID,
+		"fallback": true,
+	})
+	return a.DispatchWorker(ctx, workerID, currentRouteRequest(input), tracker, WorkerDispatchOptions{
+		Mode:              "auto_required_route_fallback",
+		RouteTool:         routeTool,
+		SuppressPeerTools: false,
+		EnforceSeniorGate: true,
+	})
+}
+
+func (a *SageOrchestratorAgent) fallbackRouteWorkerID() string {
+	if a == nil || len(a.Workers) == 0 {
+		return ""
+	}
+	if worker := a.Workers[defaultSageAutoFallbackWorkerID]; worker != nil {
+		return defaultSageAutoFallbackWorkerID
+	}
+	if worker := a.Workers[SeniorDevAgentID]; worker != nil {
+		return SeniorDevAgentID
+	}
+	for id, worker := range a.Workers {
+		if strings.TrimSpace(id) != "" && worker != nil {
+			return id
+		}
+	}
+	return ""
+}
+
+func (a *SageOrchestratorAgent) routeToolNameForWorker(workerID string) string {
+	for toolName, targetWorkerID := range a.routeTargets() {
+		if targetWorkerID == workerID {
+			return toolName
+		}
+	}
+	return ""
+}
+
 func requiresOrchestratorWorkerRoute(input string) bool {
 	return isDeliveryWorkRequest(input)
 }
@@ -633,18 +666,23 @@ func requiredWorkerRouteInstruction(input string) string {
 		"Original request: " + normalizeRouteRequest(input)
 }
 
-func normalizeRouteRequest(query string) string {
-	normalized := strings.ToLower(strings.TrimSpace(query))
+func currentRouteRequest(query string) string {
+	trimmed := strings.TrimSpace(query)
+	normalized := strings.ToLower(trimmed)
 	markers := []string{
 		"current user request:",
 		"current request:",
 	}
 	for _, marker := range markers {
 		if idx := strings.LastIndex(normalized, marker); idx >= 0 {
-			return strings.TrimSpace(normalized[idx+len(marker):])
+			return strings.TrimSpace(trimmed[idx+len(marker):])
 		}
 	}
-	return normalized
+	return trimmed
+}
+
+func normalizeRouteRequest(query string) string {
+	return strings.ToLower(currentRouteRequest(query))
 }
 
 func isApplicationCreationRequest(normalized string) bool {

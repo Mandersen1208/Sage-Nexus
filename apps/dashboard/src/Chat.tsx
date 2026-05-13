@@ -275,11 +275,30 @@ function saveSessions(sessions: ChatSession[]) {
 }
 
 function taskText(task: TaskTimeline): string {
-  return task.finalText ?? task.artifact ?? "";
+  return task.finalText || task.artifact || "";
 }
 
 function taskError(task: TaskTimeline): string {
   return task.errorText ?? "Task failed";
+}
+
+function isLiveTask(task: TaskTimeline): boolean {
+  return (
+    task.state !== "completed" &&
+    task.state !== "failed" &&
+    task.state !== "canceled" &&
+    task.state !== "rejected"
+  );
+}
+
+function liveStreamAgent(task: TaskTimeline): string {
+  for (let index = task.events.length - 1; index >= 0; index -= 1) {
+    const evt = task.events[index];
+    if (evt?.metadata?.activity !== "model_delta") continue;
+    const agent = evt.metadata.agent;
+    if (typeof agent === "string" && agent) return agent;
+  }
+  return "agent";
 }
 
 function relativeTime(ms: number): string {
@@ -331,17 +350,18 @@ export default function ChatPage({ stream, onOpenTask }: ChatPageProps) {
   const activeTaskIds = useMemo(
     () =>
       contextTasks
-        .filter(
-          (task) =>
-            task.state !== "completed" &&
-            task.state !== "failed" &&
-            task.state !== "canceled" &&
-            task.state !== "rejected",
-        )
+        .filter(isLiveTask)
         .map((task) => task.taskId),
     [contextTasks],
   );
   const activeCount = activeTaskIds.length;
+  const liveStreamTask = useMemo(
+    () =>
+      contextTasks
+        .filter((task) => isLiveTask(task) && Boolean(task.liveText))
+        .sort((a, b) => b.lastEventAt - a.lastEventAt)[0],
+    [contextTasks],
+  );
 
   const pullProviderStatus = useCallback(async () => {
     try {
@@ -941,6 +961,18 @@ export default function ChatPage({ stream, onOpenTask }: ChatPageProps) {
             ))}
             <div ref={bottomRef} />
           </div>
+
+          {liveStreamTask?.liveText && (
+            <div className="chat-stream-box" role="status" aria-live="polite">
+              <div className="chat-stream-box-head">
+                <span>Live output</span>
+                <small>{liveStreamAgent(liveStreamTask)}</small>
+              </div>
+              <div className="chat-stream-box-body">
+                <MarkdownMessage text={liveStreamTask.liveText} />
+              </div>
+            </div>
+          )}
 
           <div className="chat-composer">
             <div className="compose-mode-row">

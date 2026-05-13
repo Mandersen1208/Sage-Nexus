@@ -104,6 +104,13 @@ func (r *continuationRegistry) deliver(taskID string, msg a2a.ControlMessage) bo
 	}
 }
 
+func (r *continuationRegistry) exists(taskID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.channels[taskID]
+	return ok
+}
+
 //go:embed static
 var staticFiles embed.FS
 
@@ -123,6 +130,7 @@ type SageResponse struct {
 // the fields the orchestrator cares about.
 type inboundTask struct {
 	TaskID        string
+	ActiveTaskID  string
 	ContextID     string
 	Content       string
 	Capability    string
@@ -153,6 +161,7 @@ func parseA2AMessage(payload []byte) (inboundTask, error) {
 	agentMode, _ := msg.Metadata["agent_mode"].(string)
 	targetAgentID, _ := msg.Metadata["target_agent_id"].(string)
 	modeLabel, _ := msg.Metadata["mode_label"].(string)
+	activeTaskID, _ := msg.Metadata["active_task_id"].(string)
 	if cap == "" {
 		cap = "acp:cap:skill.agent-delegate"
 	}
@@ -161,6 +170,7 @@ func parseA2AMessage(payload []byte) (inboundTask, error) {
 	}
 	return inboundTask{
 		TaskID:        msg.TaskID,
+		ActiveTaskID:  activeTaskID,
 		ContextID:     msg.ContextID,
 		Content:       content.String(),
 		Capability:    cap,
@@ -178,6 +188,12 @@ func newTaskID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return "http-" + hex.EncodeToString(b)
+}
+
+func newActiveTaskID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return "chat-task-" + hex.EncodeToString(b)
 }
 
 func newContextID() string {
@@ -386,6 +402,7 @@ func main() {
 		}
 	}
 	chatSessions := sageagents.NewRedisChatSessionStore(rc, sessionTTLHours)
+	chatActiveTasks := newChatActiveTaskStore(rc, sessionTTLHours)
 	dispatchSessions := sageagents.NewRedisSessionStore(rc, sessionTTLHours)
 	var workContexts *sageagents.WorkContextStore
 	if managerEnvBool("SAGE_WORK_CONTEXT_ENABLED", true) {
@@ -467,7 +484,7 @@ func main() {
 				continue
 			}
 			log.Printf("← [%s] cap=%s  content=%.60s...", task.TaskID, task.Capability, task.Content)
-			go handleTask(ctx, rc, orchestrator, sageRunner, acpClient, pub, chatSessions, dispatchSessions, workContexts, task)
+			go handleTask(ctx, rc, orchestrator, sageRunner, acpClient, pub, chatSessions, chatActiveTasks, dispatchSessions, workContexts, task)
 		}
 	}()
 
@@ -559,7 +576,7 @@ func main() {
 		}
 		log.Printf("← [%s] (HTTP) cap=%s  content=%.60s...", task.TaskID, task.Capability, task.Content)
 
-		reply := runTask(r.Context(), rc, orchestrator, sageRunner, acpClient, pub, chatSessions, dispatchSessions, workContexts, task)
+		reply := runTask(r.Context(), rc, orchestrator, sageRunner, acpClient, pub, chatSessions, chatActiveTasks, dispatchSessions, workContexts, task)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(reply)
 	})
@@ -737,10 +754,58 @@ func main() {
 			return
 		}
 
+		if active, ok := chatActiveTasks.get(r.Context(), body.ContextID); ok && active.ActiveRunID != "" && continuations.exists(active.ActiveRunID) {
+			userMessageID := newChatMessageID()
+			if chatSessions != nil {
+				if err := chatSessions.AppendMessage(r.Context(), body.ContextID, sageagents.ChatTranscriptMessage{
+					ID:        userMessageID,
+					Role:      "user",
+					Text:      body.Content,
+					CreatedAt: time.Now().UnixMilli(),
+					TaskID:    active.ActiveRunID,
+				}); err != nil {
+					log.Printf("[chat-sessions] append continuation user %s failed: %v", body.ContextID, err)
+				}
+			}
+			chatActiveTasks.markRunRunning(r.Context(), body.ContextID, active.ActiveTaskID, active.ActiveRunID)
+			cm := a2a.ControlMessage{TaskID: active.ActiveRunID, Decision: "continue", Note: body.Content}
+			payload, err := json.Marshal(cm)
+			if err != nil {
+				http.Error(w, "marshal failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := rc.Publish(r.Context(), a2a.ChannelControl, payload).Err(); err != nil {
+				http.Error(w, "publish failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			log.Printf("<- [%s] (chat continuation) contextId=%s activeTaskId=%s content=%.60s...", active.ActiveRunID, body.ContextID, active.ActiveTaskID, body.Content)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"taskId":       active.ActiveRunID,
+				"contextId":    body.ContextID,
+				"activeTaskId": active.ActiveTaskID,
+				"continued":    "true",
+			})
+			return
+		}
+
+		activeTaskID := newActiveTaskID()
+		if active, ok := chatActiveTasks.get(r.Context(), body.ContextID); ok && active.ActiveTaskID != "" && active.TaskState != activeTaskStateCompleted {
+			activeTaskID = active.ActiveTaskID
+		}
 		taskID := newTaskID()
+		userMessageID := newChatMessageID()
+		if chatActiveTasks != nil {
+			if _, err := chatActiveTasks.startRun(r.Context(), chatActiveTaskPointer{
+				ContextID:    body.ContextID,
+				ActiveTaskID: activeTaskID,
+			}, taskID, body.Content, userMessageID); err != nil {
+				log.Printf("[active-task] start run %s failed: %v", taskID, err)
+			}
+		}
 		if chatSessions != nil {
 			if err := chatSessions.AppendMessage(r.Context(), body.ContextID, sageagents.ChatTranscriptMessage{
-				ID:        newChatMessageID(),
+				ID:        userMessageID,
 				Role:      "user",
 				Text:      body.Content,
 				CreatedAt: time.Now().UnixMilli(),
@@ -773,6 +838,7 @@ func main() {
 				"agent_mode":      selection.AgentMode,
 				"target_agent_id": selection.TargetAgentID,
 				"mode_label":      selection.Label,
+				"active_task_id":  activeTaskID,
 			},
 		}
 		payload, err := json.Marshal(msg)
@@ -796,8 +862,9 @@ func main() {
 		log.Printf("<- [%s] (chat) contextId=%s mode=%s target=%s content=%.60s...", taskID, body.ContextID, selection.AgentMode, selection.TargetAgentID, body.Content)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
-			"taskId":    taskID,
-			"contextId": body.ContextID,
+			"taskId":       taskID,
+			"contextId":    body.ContextID,
+			"activeTaskId": activeTaskID,
 		})
 	})
 
@@ -823,6 +890,13 @@ func main() {
 		if body.TaskID == "" || (body.Decision != "continue" && body.Decision != "stop") {
 			http.Error(w, "taskId and decision (continue|stop) required", http.StatusBadRequest)
 			return
+		}
+		if active, ok := chatActiveTasks.resolveRun(r.Context(), body.TaskID); ok {
+			if body.Decision == "stop" {
+				chatActiveTasks.markRunStopped(r.Context(), active.ContextID, active.ActiveTaskID, body.TaskID)
+			} else {
+				chatActiveTasks.markRunRunning(r.Context(), active.ContextID, active.ActiveTaskID, body.TaskID)
+			}
 		}
 		cm := a2a.ControlMessage{TaskID: body.TaskID, Decision: body.Decision, Note: body.Note}
 		payload, err := json.Marshal(cm)
@@ -861,6 +935,9 @@ func main() {
 			return
 		}
 		if activeTasks.cancel(body.TaskID) {
+			if active, ok := chatActiveTasks.resolveRun(r.Context(), body.TaskID); ok {
+				chatActiveTasks.markRunStopped(r.Context(), active.ContextID, active.ActiveTaskID, body.TaskID)
+			}
 			log.Printf("<- [%s] (chat/stop) cancel requested", body.TaskID)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": "canceling"})
@@ -1902,11 +1979,12 @@ func handleTask(
 	acp *sageagents.ACPClient,
 	pub *sageagents.ErrorPublisher,
 	chatSessions *sageagents.RedisChatSessionStore,
+	chatActiveTasks *chatActiveTaskStore,
 	dispatchSessions sageagents.SessionStore,
 	workContexts *sageagents.WorkContextStore,
 	task inboundTask,
 ) {
-	runTask(ctx, rc, orch, sage, acp, pub, chatSessions, dispatchSessions, workContexts, task)
+	runTask(ctx, rc, orch, sage, acp, pub, chatSessions, chatActiveTasks, dispatchSessions, workContexts, task)
 }
 
 // runTask is the unified orchestration pipeline used by both the Redis
@@ -1921,6 +1999,7 @@ func runTask(
 	acp *sageagents.ACPClient,
 	pub *sageagents.ErrorPublisher,
 	chatSessions *sageagents.RedisChatSessionStore,
+	chatActiveTasks *chatActiveTaskStore,
 	dispatchSessions sageagents.SessionStore,
 	workContexts *sageagents.WorkContextStore,
 	task inboundTask,
@@ -1956,6 +2035,9 @@ func runTask(
 		}
 	}
 	workContextID := workContext.ID
+	if chatActiveTasks != nil && task.Source == "local-chat" && task.ActiveTaskID != "" {
+		chatActiveTasks.updatePointer(ctx, task.ContextID, task.ActiveTaskID, task.TaskID, activeTaskStateActive, activeRunStateRunning, "", workContextID)
+	}
 
 	// Publish initial state transitions immediately so the dashboard sees
 	// the task before ACP and orchestration run.
@@ -2134,6 +2216,9 @@ func runTask(
 		if ids := tracker.AgentIDs(); len(ids) > 0 {
 			meta["trace"] = ids
 		}
+		if chatActiveTasks != nil && task.Source == "local-chat" && task.ActiveTaskID != "" {
+			chatActiveTasks.markInputRequired(ctx, task.ContextID, task.ActiveTaskID, task.TaskID, prompt, workContextID)
+		}
 		sageagents.AppendWorkContextEvent(ctx, "continuation_required", "manager", "Manager paused for human continuation", prompt, meta)
 		publishA2AEventWithWorkContext(rc, a2a.NewInputRequiredStatus(task.TaskID, task.ContextID, prompt, meta), workContextID)
 
@@ -2148,6 +2233,9 @@ func runTask(
 		case <-ctx.Done():
 			continuations.unregister(task.TaskID)
 			log.Printf("  Orchestrate ⏹ [%s] canceled while awaiting human", task.TaskID)
+			if chatActiveTasks != nil && task.Source == "local-chat" && task.ActiveTaskID != "" {
+				chatActiveTasks.markRunCanceled(ctx, task.ContextID, task.ActiveTaskID, task.TaskID)
+			}
 			reply.Status = "error"
 			reply.Error = "task canceled by user"
 			canceled = true
@@ -2157,6 +2245,9 @@ func runTask(
 		case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
 			continuations.unregister(task.TaskID)
 			log.Printf("  Orchestrate ⏸ [%s] no continuation decision in %dms — canceling", task.TaskID, timeoutMs)
+			if chatActiveTasks != nil && task.Source == "local-chat" && task.ActiveTaskID != "" {
+				chatActiveTasks.markRunCanceled(ctx, task.ContextID, task.ActiveTaskID, task.TaskID)
+			}
 			sageagents.AppendWorkContextEvent(ctx, "continuation_timeout", "manager", "No continuation decision received", "", map[string]interface{}{
 				"rounds_completed": cumulativeRounds,
 				"timeout_ms":       timeoutMs,
@@ -2177,6 +2268,9 @@ func runTask(
 		}
 
 		if cm.Decision == "stop" {
+			if chatActiveTasks != nil && task.Source == "local-chat" && task.ActiveTaskID != "" {
+				chatActiveTasks.markRunStopped(ctx, task.ContextID, task.ActiveTaskID, task.TaskID)
+			}
 			sageagents.AppendWorkContextEvent(ctx, "continuation_stop", "manager", "Human stopped task", cm.Note, nil)
 			// Finalize with whatever partial work we've gathered.
 			result = orch.LastReply()
@@ -2192,6 +2286,9 @@ func runTask(
 		// task was driven by Sage, resume her conversation; otherwise resume
 		// the orchestrator's router loop.
 		log.Printf("  Orchestrate ▶ [%s] resuming on user confirmation; note=%q  (sage=%v)", task.TaskID, truncateNote(cm.Note, 80), useSage)
+		if chatActiveTasks != nil && task.Source == "local-chat" && task.ActiveTaskID != "" {
+			chatActiveTasks.markRunRunning(ctx, task.ContextID, task.ActiveTaskID, task.TaskID)
+		}
 		sageagents.AppendWorkContextEvent(ctx, "continuation_continue", "manager", "Human continued task", cm.Note, nil)
 		if useSage {
 			result, err = resumeSageAutoManagerExecution(ctx, sage, orch, task, capErr.Messages, orchestrationInput, cm.Note, tracker)
@@ -2204,6 +2301,11 @@ finalize:
 	oDur := time.Since(oStart).Round(time.Millisecond)
 	if canceled || errors.Is(err, context.Canceled) {
 		log.Printf("  Orchestrate ⏹ [%s] (%s): canceled by user", task.TaskID, oDur)
+		if chatActiveTasks != nil && task.Source == "local-chat" && task.ActiveTaskID != "" {
+			if active, ok := chatActiveTasks.resolveRun(ctx, task.TaskID); !ok || active.RunState != activeRunStateStopped {
+				chatActiveTasks.markRunCanceled(ctx, task.ContextID, task.ActiveTaskID, task.TaskID)
+			}
+		}
 		if partial := orch.LastReply(); partial != "" {
 			publishA2AEventWithWorkContext(rc, a2a.NewArtifactUpdate(task.TaskID, task.ContextID, partial), workContextID)
 		}
@@ -2225,6 +2327,9 @@ finalize:
 		reply.Error = "task canceled by user"
 	} else if err != nil {
 		log.Printf("  Orchestrate ✗ [%s] (%s): %v", task.TaskID, oDur, err)
+		if chatActiveTasks != nil && task.Source == "local-chat" && task.ActiveTaskID != "" {
+			chatActiveTasks.markRunFailed(ctx, task.ContextID, task.ActiveTaskID, task.TaskID)
+		}
 		sageagents.PublishError(ctx, sageagents.ErrorEvent{RequestID: task.TaskID, Kind: "orchestrate", Agent: orch.AgentID, Error: err.Error(), DurationMS: oDur.Milliseconds()})
 		// Partial work lands BEFORE the failed status so the dashboard /
 		// MCP delegate capture both.
@@ -2247,6 +2352,10 @@ finalize:
 		}
 	} else {
 		log.Printf("  Orchestrate ✓ [%s] (%s) worker=%s replyLen=%d", task.TaskID, oDur, orch.LastWorker(), len(result))
+		if chatActiveTasks != nil && task.Source == "local-chat" && task.ActiveTaskID != "" {
+			chatActiveTasks.markRunCompleted(ctx, task.ContextID, task.ActiveTaskID, task.TaskID)
+			chatActiveTasks.clearIfTask(ctx, task.ContextID, task.ActiveTaskID)
+		}
 		if result != "" {
 			publishA2AEventWithWorkContext(rc, a2a.NewArtifactUpdate(task.TaskID, task.ContextID, result), workContextID)
 		}

@@ -95,6 +95,7 @@ export interface TaskTimeline {
   state: TaskState;
   events: TaskStatusUpdateEvent[];
   artifact: string;
+  liveText?: string;       // volatile streamed model text before final artifact
   startedAt: number;       // unix ms — first event arrival
   lastEventAt: number;     // unix ms — most recent event for liveness pulse
   finalText?: string;      // alias for artifact for downstream consumers

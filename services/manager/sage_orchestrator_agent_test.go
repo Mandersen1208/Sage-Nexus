@@ -100,6 +100,27 @@ func TestShouldRejectDirectOrchestratorReply(t *testing.T) {
 	}
 }
 
+func TestFallbackRouteWorkerIDPrefersProjectManager(t *testing.T) {
+	orch := &SageOrchestratorAgent{Workers: map[string]*CopilotAgent{
+		defaultSageAutoFallbackWorkerID: {BaseAgent: BaseAgent{AgentID: defaultSageAutoFallbackWorkerID}},
+		SeniorDevAgentID:                {BaseAgent: BaseAgent{AgentID: SeniorDevAgentID}},
+	}}
+
+	if got := orch.fallbackRouteWorkerID(); got != defaultSageAutoFallbackWorkerID {
+		t.Fatalf("fallbackRouteWorkerID() = %q, want %q", got, defaultSageAutoFallbackWorkerID)
+	}
+}
+
+func TestCurrentRouteRequestPreservesOriginalCase(t *testing.T) {
+	input := "Recent chat context:\n- prior app discussion\n\nCurrent user request:\nMake Me An Application"
+	if got := currentRouteRequest(input); got != "Make Me An Application" {
+		t.Fatalf("currentRouteRequest() = %q, want original-cased request", got)
+	}
+	if got := normalizeRouteRequest(input); got != "make me an application" {
+		t.Fatalf("normalizeRouteRequest() = %q, want lowercase current request", got)
+	}
+}
+
 func TestRuntimeLibrarianIsNotTopLevelRoute(t *testing.T) {
 	cfg := mustLoadPackageRegistry(t)
 	routes, warnings := cfg.BuildOrchestratorRoutes()

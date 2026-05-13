@@ -1,6 +1,7 @@
 package sageagents
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -156,14 +157,43 @@ type chatRequest struct {
 
 // chatResponse is the response from the Copilot chat completions endpoint.
 type chatResponse struct {
+	Choices []chatChoice `json:"choices"`
+	Error   *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error,omitempty"`
+}
+
+type chatChoice struct {
+	Message      ChatMessage `json:"message"`
+	FinishReason string      `json:"finish_reason"`
+}
+
+type chatStreamResponse struct {
 	Choices []struct {
-		Message      ChatMessage `json:"message"`
-		FinishReason string      `json:"finish_reason"`
+		Delta        chatStreamDelta `json:"delta"`
+		FinishReason string          `json:"finish_reason"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
 	} `json:"error,omitempty"`
+}
+
+type chatStreamDelta struct {
+	Role      string                `json:"role,omitempty"`
+	Content   string                `json:"content,omitempty"`
+	ToolCalls []chatStreamToolDelta `json:"tool_calls,omitempty"`
+}
+
+type chatStreamToolDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Function struct {
+		Name      string `json:"name,omitempty"`
+		Arguments string `json:"arguments,omitempty"`
+	} `json:"function,omitempty"`
 }
 
 // SetStateDir tells the agent where to find Sage's state directory so it can
@@ -725,9 +755,20 @@ func (a *CopilotAgent) callCopilot(ctx context.Context, messages []ChatMessage, 
 		Model:    pm.Model,
 		Messages: messages,
 		Tools:    tools,
-		Stream:   false,
+		Stream:   envBool("SAGE_COPILOT_STREAM", true),
 	}
 	log.Printf("[copilot-chat-call] %s using model: %s", a.AgentID, payload.Model)
+	if payload.Stream {
+		result, err := a.callCopilotStream(ctx, token, payload)
+		if err == nil {
+			return result, nil
+		}
+		if !envBool("SAGE_COPILOT_STREAM_FALLBACK", true) {
+			return nil, err
+		}
+		log.Printf("[copilot-chat-call] %s stream failed; falling back to buffered response: %v", a.AgentID, err)
+		payload.Stream = false
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -791,6 +832,130 @@ func (a *CopilotAgent) callCopilot(ctx context.Context, messages []ChatMessage, 
 		return nil, fmt.Errorf("Copilot error [%s]: %s", result.Error.Type, result.Error.Message)
 	}
 	return &result, nil
+}
+
+func (a *CopilotAgent) callCopilotStream(ctx context.Context, token string, payload chatRequest) (*chatResponse, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := normalizeCopilotAPIBaseURL(a.copilotBaseURL) + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Editor-Version", "vscode/1.85.0")
+	req.Header.Set("Editor-Plugin-Version", "copilot-chat/0.12.0")
+	req.Header.Set("Openai-Intent", "conversation-panel")
+	req.Header.Set("Copilot-Integration-Id", "vscode-chat")
+
+	httpStart := time.Now()
+	resp, err := copilotHTTPClient.Do(req)
+	EmitLatencySpan(ctx, "provider_chat_stream_connect", httpStart)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Copilot stream API error (%d): %s", resp.StatusCode, b)
+	}
+	result, err := a.readCopilotStream(ctx, resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (a *CopilotAgent) readCopilotStream(ctx context.Context, body io.Reader) (*chatResponse, error) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var content strings.Builder
+	toolCalls := map[int]*ToolCall{}
+	finishReason := ""
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		raw := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if raw == "" || raw == "[DONE]" {
+			continue
+		}
+		var chunk chatStreamResponse
+		if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
+			return nil, fmt.Errorf("parse Copilot stream chunk: %w", err)
+		}
+		if chunk.Error != nil {
+			return nil, fmt.Errorf("Copilot stream error [%s]: %s", chunk.Error.Type, chunk.Error.Message)
+		}
+		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
+			if choice.Delta.Content != "" {
+				content.WriteString(choice.Delta.Content)
+				EmitProgress(ctx, ProgressEvent{
+					Type:      "model_delta",
+					Agent:     a.AgentID,
+					Message:   choice.Delta.Content,
+					Timestamp: time.Now().Unix(),
+				})
+			}
+			for _, delta := range choice.Delta.ToolCalls {
+				call := toolCalls[delta.Index]
+				if call == nil {
+					call = &ToolCall{}
+					toolCalls[delta.Index] = call
+				}
+				if delta.ID != "" {
+					call.ID = delta.ID
+				}
+				if delta.Type != "" {
+					call.Type = delta.Type
+				}
+				if delta.Function.Name != "" {
+					call.Function.Name += delta.Function.Name
+				}
+				if delta.Function.Arguments != "" {
+					call.Function.Arguments += delta.Function.Arguments
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if finishReason == "" {
+		finishReason = "stop"
+	}
+	orderedTools := make([]ToolCall, 0, len(toolCalls))
+	for i := 0; i < len(toolCalls); i++ {
+		if call := toolCalls[i]; call != nil {
+			if call.Type == "" {
+				call.Type = "function"
+			}
+			orderedTools = append(orderedTools, *call)
+		}
+	}
+	if len(orderedTools) > 0 && finishReason == "stop" {
+		finishReason = "tool_calls"
+	}
+	return &chatResponse{Choices: []chatChoice{{
+		Message: ChatMessage{
+			Role:      "assistant",
+			Content:   content.String(),
+			ToolCalls: orderedTools,
+		},
+		FinishReason: finishReason,
+	}}}, nil
 }
 
 // getToken returns a valid Copilot API token, refreshing if needed.

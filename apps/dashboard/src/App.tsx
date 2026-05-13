@@ -218,7 +218,7 @@ function buildMergedRequests({ tasks, logs }: StreamState): MergedRequest[] {
       content: inputText || str(logMap.get(id)?.input),
       status: statusToLegacy(t.state),
       timestamp: Math.floor(t.startedAt / 1000),
-      output: t.finalText ?? t.artifact,
+      output: t.finalText || t.artifact,
       error: t.errorText,
       log: logMap.get(id),
       timeline: t,

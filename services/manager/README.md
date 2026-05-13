@@ -25,6 +25,12 @@ Key state/config:
   - `MANAGER_DISPATCH_ROLLING_MAX_CHARS` (default `700`)
 - Delegated output behavior:
   - `SAGE_DELEGATED_PREFER_WORKER_REPLY` (default `true`)
+- Live model output:
+  - `SAGE_COPILOT_STREAM` (default `true`) enables Copilot SSE streaming.
+  - `SAGE_COPILOT_STREAM_FALLBACK` (default `true`) falls back to buffered
+    Copilot responses if streaming is unavailable.
+  - Streamed `model_delta` events are volatile UI output only. They are not
+    persisted as chat transcript or task memory.
 
 ## Provider Auth
 
@@ -49,6 +55,9 @@ Codex is available through a local bridge:
 Any configured agent can be switched to `codex/gpt-5.5` through `/agents/models`.
 When Codex-backed agents need tools, the manager executes the existing approved
 MCP/local tools and returns the results to the Codex bridge loop.
+
+Codex bridge responses are currently buffered by the local `codex exec` bridge.
+Live model deltas are implemented for the Copilot provider path first.
 
 ## API Groups
 
