@@ -25,13 +25,42 @@ import type {
 } from "./api.js";
 import type { StreamState } from "./hooks/useStream.js";
 import type { TaskTimeline } from "./types.js";
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import SyntaxHighlighter from "react-syntax-highlighter/dist/esm/prism-light";
+import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
+import css from "react-syntax-highlighter/dist/esm/languages/prism/css";
+import diff from "react-syntax-highlighter/dist/esm/languages/prism/diff";
+import docker from "react-syntax-highlighter/dist/esm/languages/prism/docker";
+import go from "react-syntax-highlighter/dist/esm/languages/prism/go";
+import javascript from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
+import json from "react-syntax-highlighter/dist/esm/languages/prism/json";
+import jsx from "react-syntax-highlighter/dist/esm/languages/prism/jsx";
+import markdown from "react-syntax-highlighter/dist/esm/languages/prism/markdown";
+import powershell from "react-syntax-highlighter/dist/esm/languages/prism/powershell";
+import sql from "react-syntax-highlighter/dist/esm/languages/prism/sql";
+import tsx from "react-syntax-highlighter/dist/esm/languages/prism/tsx";
+import typescript from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
+import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
+import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 
 type ChatRole = "user" | "assistant";
 type ChatStatus = "pending" | "done" | "error";
+
+SyntaxHighlighter.registerLanguage("bash", bash);
+SyntaxHighlighter.registerLanguage("css", css);
+SyntaxHighlighter.registerLanguage("diff", diff);
+SyntaxHighlighter.registerLanguage("docker", docker);
+SyntaxHighlighter.registerLanguage("go", go);
+SyntaxHighlighter.registerLanguage("javascript", javascript);
+SyntaxHighlighter.registerLanguage("json", json);
+SyntaxHighlighter.registerLanguage("jsx", jsx);
+SyntaxHighlighter.registerLanguage("markdown", markdown);
+SyntaxHighlighter.registerLanguage("powershell", powershell);
+SyntaxHighlighter.registerLanguage("sql", sql);
+SyntaxHighlighter.registerLanguage("tsx", tsx);
+SyntaxHighlighter.registerLanguage("typescript", typescript);
+SyntaxHighlighter.registerLanguage("yaml", yaml);
 
 interface ChatAttachment {
   id: string;
@@ -291,16 +320,6 @@ function isLiveTask(task: TaskTimeline): boolean {
   );
 }
 
-function liveStreamAgent(task: TaskTimeline): string {
-  for (let index = task.events.length - 1; index >= 0; index -= 1) {
-    const evt = task.events[index];
-    if (evt?.metadata?.activity !== "model_delta") continue;
-    const agent = evt.metadata.agent;
-    if (typeof agent === "string" && agent) return agent;
-  }
-  return "agent";
-}
-
 function relativeTime(ms: number): string {
   const diff = Math.max(0, Date.now() - ms);
   if (diff < 60_000) return "now";
@@ -355,13 +374,6 @@ export default function ChatPage({ stream, onOpenTask }: ChatPageProps) {
     [contextTasks],
   );
   const activeCount = activeTaskIds.length;
-  const liveStreamTask = useMemo(
-    () =>
-      contextTasks
-        .filter((task) => isLiveTask(task) && Boolean(task.liveText))
-        .sort((a, b) => b.lastEventAt - a.lastEventAt)[0],
-    [contextTasks],
-  );
 
   const pullProviderStatus = useCallback(async () => {
     try {
@@ -961,18 +973,6 @@ export default function ChatPage({ stream, onOpenTask }: ChatPageProps) {
             ))}
             <div ref={bottomRef} />
           </div>
-
-          {liveStreamTask?.liveText && (
-            <div className="chat-stream-box" role="status" aria-live="polite">
-              <div className="chat-stream-box-head">
-                <span>Live output</span>
-                <small>{liveStreamAgent(liveStreamTask)}</small>
-              </div>
-              <div className="chat-stream-box-body">
-                <MarkdownMessage text={liveStreamTask.liveText} />
-              </div>
-            </div>
-          )}
 
           <div className="chat-composer">
             <div className="compose-mode-row">

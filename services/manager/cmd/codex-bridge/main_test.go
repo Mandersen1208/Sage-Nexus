@@ -30,7 +30,7 @@ func TestRunCodexUsesRequestedModel(t *testing.T) {
 		t.Fatalf("response = %q", got)
 	}
 	args := readFile(t, argsFile)
-	if !strings.Contains(args, "exec") || !strings.Contains(args, "--model") || !strings.Contains(args, "gpt-5.5") {
+	if !strings.Contains(args, "exec") || !strings.Contains(args, "--ignore-user-config") || !strings.Contains(args, "--model") || !strings.Contains(args, "gpt-5.5") {
 		t.Fatalf("codex args did not include requested model: %q", args)
 	}
 }

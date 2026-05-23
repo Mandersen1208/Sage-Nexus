@@ -20,7 +20,6 @@ Sage Nexus keeps the current Sage shape:
 - Daily source sync at local `2:00 AM` plus manual sync endpoints/actions.
 - `/dispatch` session-based rolling short-term memory window for manager chat/tool drafting flows.
 - Delegated reply pass-through defaults that preserve worker output fidelity.
-- Copilot live model deltas stream into the chat page's bottom Live output box while final artifacts remain the persisted response.
 
 ## Current Defaults
 
@@ -45,6 +44,16 @@ The SOUL path intentionally keeps compatibility with the current real file while
 
 ```powershell
 cd C:\Users\matta\code\sage-nexus
+.\startup.ps1
+```
+
+`startup.ps1` stops any existing host Codex bridge on port `8765`, rebuilds the
+Docker stack without cache, starts Docker detached, then starts the host Codex
+bridge on `0.0.0.0:8765`.
+
+For a Docker-only start, use:
+
+```powershell
 docker compose up --build
 ```
 
@@ -80,10 +89,14 @@ Device login defaults to the Copilot OAuth client flow. Set `GITHUB_CLIENT_ID` o
 instead of `OPENAI_API_KEY`; manager-mediated MCP/local tools remain owned by
 the manager.
 
-Start the bridge on Windows before Docker:
+The normal `startup.ps1` flow starts the bridge after Docker is up. To run the
+bridge manually:
 
 ```powershell
 cd C:\Users\matta\code\sage-nexus\services\manager
+$env:CODEX_BIN="C:\Users\matta\AppData\Roaming\npm\codex.cmd"
+$env:CODEX_BRIDGE_LISTEN_ADDR="0.0.0.0:8765"
+$env:CODEX_DEFAULT_MODEL="gpt-5.5"
 go run .\cmd\codex-bridge
 ```
 
@@ -102,6 +115,8 @@ apps/dashboard        React Sage Nexus UI
 services/manager      Go manager/orchestrator and Sage agents
 services/acp-server   Go ACP admission service
 services/sage-mcp     TypeScript MCP tools
-configs               Extracted registry and prompts
+examples              Non-runtime example configs
 docs                  Standalone architecture and migration notes
 ```
+
+Refactor ownership notes are tracked in `docs/REFACTOR_MAP.md`.

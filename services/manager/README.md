@@ -25,12 +25,6 @@ Key state/config:
   - `MANAGER_DISPATCH_ROLLING_MAX_CHARS` (default `700`)
 - Delegated output behavior:
   - `SAGE_DELEGATED_PREFER_WORKER_REPLY` (default `true`)
-- Live model output:
-  - `SAGE_COPILOT_STREAM` (default `true`) enables Copilot SSE streaming.
-  - `SAGE_COPILOT_STREAM_FALLBACK` (default `true`) falls back to buffered
-    Copilot responses if streaming is unavailable.
-  - Streamed `model_delta` events are volatile UI output only. They are not
-    persisted as chat transcript or task memory.
 
 ## Provider Auth
 
@@ -57,7 +51,17 @@ When Codex-backed agents need tools, the manager executes the existing approved
 MCP/local tools and returns the results to the Codex bridge loop.
 
 Codex bridge responses are currently buffered by the local `codex exec` bridge.
-Live model deltas are implemented for the Copilot provider path first.
+Provider route ownership lives in `cmd/manager/provider_auth_routes.go`.
+
+## Internal Layout
+
+- `cmd/manager/main.go`: service assembly plus remaining chat/A2A runtime.
+- `cmd/manager/provider_auth_routes.go`: Copilot and Codex provider status/auth routes.
+- `cmd/manager/task_runtime_registry.go`: in-memory cancellation and continuation registries.
+- `cmd/manager/active_task_store.go`: Redis active task pointer and run lifecycle state.
+- Package-level files own reusable manager, agent, provider, session, and work-context logic.
+
+The current file ownership/refactor map is documented in `../../docs/REFACTOR_MAP.md`.
 
 ## API Groups
 

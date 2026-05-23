@@ -145,8 +145,6 @@ func mapActivity(t string) string {
 		return "heartbeat"
 	case "latency":
 		return "latency"
-	case "model_delta":
-		return "model_delta"
 	default:
 		return t
 	}
@@ -186,8 +184,6 @@ func summarizeProgress(evt ProgressEvent) string {
 			return fmt.Sprintf("%s took %dms", evt.Tool, evt.DurationMS)
 		}
 		return fmt.Sprintf("latency %dms", evt.DurationMS)
-	case "model_delta":
-		return evt.Message
 	case "done":
 		return "done"
 	case "error":

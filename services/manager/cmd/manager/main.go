@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -26,90 +25,7 @@ import (
 	"github.com/matta/sage-nexus/services/manager/a2a"
 )
 
-// continuationRegistry holds per-task channels used to deliver ControlMessage
-// values to a paused orchestration goroutine. Sage's delegate_continue MCP
-// tool publishes to sage:control; the manager's subscriber routes by taskId.
-type continuationRegistry struct {
-	mu       sync.Mutex
-	channels map[string]chan a2a.ControlMessage
-}
-
-var continuations = &continuationRegistry{channels: make(map[string]chan a2a.ControlMessage)}
-
-type activeTaskRegistry struct {
-	mu      sync.Mutex
-	cancels map[string]*activeTaskCancel
-}
-
-type activeTaskCancel struct {
-	cancel context.CancelFunc
-}
-
-var activeTasks = &activeTaskRegistry{cancels: make(map[string]*activeTaskCancel)}
 var discoveryRuntime *skillDiscoveryRuntime
-
-func (r *activeTaskRegistry) register(parent context.Context, taskID string) (context.Context, func()) {
-	ctx, cancel := context.WithCancel(parent)
-	entry := &activeTaskCancel{cancel: cancel}
-	r.mu.Lock()
-	r.cancels[taskID] = entry
-	r.mu.Unlock()
-
-	cleanup := func() {
-		r.mu.Lock()
-		if current, ok := r.cancels[taskID]; ok && current == entry {
-			delete(r.cancels, taskID)
-		}
-		r.mu.Unlock()
-	}
-	return ctx, cleanup
-}
-
-func (r *activeTaskRegistry) cancel(taskID string) bool {
-	r.mu.Lock()
-	entry, ok := r.cancels[taskID]
-	r.mu.Unlock()
-	if ok {
-		entry.cancel()
-	}
-	return ok
-}
-
-func (r *continuationRegistry) register(taskID string) chan a2a.ControlMessage {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	ch := make(chan a2a.ControlMessage, 1)
-	r.channels[taskID] = ch
-	return ch
-}
-
-func (r *continuationRegistry) unregister(taskID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.channels, taskID)
-}
-
-func (r *continuationRegistry) deliver(taskID string, msg a2a.ControlMessage) bool {
-	r.mu.Lock()
-	ch, ok := r.channels[taskID]
-	r.mu.Unlock()
-	if !ok {
-		return false
-	}
-	select {
-	case ch <- msg:
-		return true
-	default:
-		return false
-	}
-}
-
-func (r *continuationRegistry) exists(taskID string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	_, ok := r.channels[taskID]
-	return ok
-}
 
 //go:embed static
 var staticFiles embed.FS
@@ -155,15 +71,15 @@ func parseA2AMessage(payload []byte) (inboundTask, error) {
 			content.WriteString(p.Text)
 		}
 	}
-	cap, _ := msg.Metadata["capability"].(string)
+	capability, _ := msg.Metadata["capability"].(string)
 	res, _ := msg.Metadata["resource"].(string)
 	source, _ := msg.Metadata["source"].(string)
 	agentMode, _ := msg.Metadata["agent_mode"].(string)
 	targetAgentID, _ := msg.Metadata["target_agent_id"].(string)
 	modeLabel, _ := msg.Metadata["mode_label"].(string)
 	activeTaskID, _ := msg.Metadata["active_task_id"].(string)
-	if cap == "" {
-		cap = "acp:cap:skill.agent-delegate"
+	if capability == "" {
+		capability = "acp:cap:skill.agent-delegate"
 	}
 	if res == "" {
 		res = "sage://workspace/*"
@@ -173,7 +89,7 @@ func parseA2AMessage(payload []byte) (inboundTask, error) {
 		ActiveTaskID:  activeTaskID,
 		ContextID:     msg.ContextID,
 		Content:       content.String(),
-		Capability:    cap,
+		Capability:    capability,
 		Resource:      res,
 		Source:        source,
 		AgentMode:     agentMode,
@@ -185,27 +101,31 @@ func parseA2AMessage(payload []byte) (inboundTask, error) {
 // newTaskID generates a synthetic task ID for HTTP-originated requests so the
 // dashboard can correlate them on the same bus.
 func newTaskID() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
+	b := mustRandomBytes(8)
 	return "http-" + hex.EncodeToString(b)
 }
 
 func newActiveTaskID() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
+	b := mustRandomBytes(8)
 	return "chat-task-" + hex.EncodeToString(b)
 }
 
 func newContextID() string {
-	b := make([]byte, 6)
-	_, _ = rand.Read(b)
+	b := mustRandomBytes(6)
 	return "local-" + time.Now().Format("20060102T150405") + "-" + hex.EncodeToString(b)
 }
 
 func newChatMessageID() string {
-	b := make([]byte, 6)
-	_, _ = rand.Read(b)
+	b := mustRandomBytes(6)
 	return "msg-" + hex.EncodeToString(b)
+}
+
+func mustRandomBytes(size int) []byte {
+	b := make([]byte, size)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Errorf("generate random identifier: %w", err))
+	}
+	return b
 }
 
 func main() {
@@ -251,7 +171,10 @@ func main() {
 	availableMCPTools := toolNameSet(mcpToolCatalog)
 
 	buildWorker := func(id string) *sageagents.CopilotAgent {
-		prompt, _ := cfg.SystemPrompt(id)
+		prompt, err := cfg.SystemPrompt(id)
+		if err != nil {
+			log.Printf("Warning: system prompt for %s: %v", id, err)
+		}
 		model := cfg.ModelFor(id)
 		allowedTools, warnings := cfg.ResolveToolsForAgent(id)
 		for _, warning := range warnings {
@@ -467,7 +390,11 @@ func main() {
 	// stream every event back on sage:events.
 	go func() {
 		ps := rc.Subscribe(ctx, a2a.ChannelTasks)
-		defer ps.Close()
+		defer func() {
+			if err := ps.Close(); err != nil {
+				log.Printf("Redis task subscription close failed: %v", err)
+			}
+		}()
 		log.Printf("Subscribed to %s — waiting for A2A tasks from Sage", a2a.ChannelTasks)
 
 		for {
@@ -494,7 +421,11 @@ func main() {
 	// which lands here.
 	go func() {
 		ps := rc.Subscribe(ctx, a2a.ChannelControl)
-		defer ps.Close()
+		defer func() {
+			if err := ps.Close(); err != nil {
+				log.Printf("Redis control subscription close failed: %v", err)
+			}
+		}()
 		log.Printf("Subscribed to %s — waiting for control messages", a2a.ChannelControl)
 
 		for {
@@ -518,19 +449,23 @@ func main() {
 	// ── HTTP (health + debug + dashboard SSE) ────────────────────────────────
 	mux := http.NewServeMux()
 	mgr.RegisterRoutes(mux)
-	uiFS, _ := fs.Sub(staticFiles, "static")
+	uiFS, err := fs.Sub(staticFiles, "static")
+	if err != nil {
+		log.Fatalf("static UI embed invalid: %v", err)
+	}
 	mux.Handle("/", http.FileServer(http.FS(uiFS)))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","agent":"%s","acp_ready":%v}`,
-			agentID, acpClient != nil)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":    "ok",
+			"agent":     agentID,
+			"acp_ready": acpClient != nil,
+		})
 	})
 
 	// /orchestrator/errors — cross-request error memory.
 	registerProviderAuthRoutes(mux, stateDir, codexBridgeURL)
 	mux.HandleFunc("/orchestrator/errors", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"started_at": orchestrator.ErrorsStartedAt(),
 			"recent":     orchestrator.RecentErrors(50),
 			"stats_15m":  orchestrator.ErrorStats(15 * time.Minute),
@@ -577,8 +512,7 @@ func main() {
 		log.Printf("← [%s] (HTTP) cap=%s  content=%.60s...", task.TaskID, task.Capability, task.Content)
 
 		reply := runTask(r.Context(), rc, orchestrator, sageRunner, acpClient, pub, chatSessions, chatActiveTasks, dispatchSessions, workContexts, task)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(reply)
+		writeJSON(w, http.StatusOK, reply)
 	})
 
 	// /agent-dispatch handles bounded peer-to-peer consultations from worker agents.
@@ -615,22 +549,16 @@ func main() {
 			return
 		}
 		if !managerEnvBool("SAGE_AGENT_MESH_ENABLED", true) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]string{"error": "agent mesh disabled"})
+			writeJSONError(w, http.StatusForbidden, "agent mesh disabled")
 			return
 		}
 		maxDepth := sageagents.PeerMeshMaxDepthFor(req.CallerAgentID)
 		if req.Depth >= maxDepth {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("max agent call depth (%d) reached", maxDepth)})
+			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("max agent call depth (%d) reached", maxDepth))
 			return
 		}
 		if !sageagents.IsPeerCallAllowed(req.CallerAgentID, req.TargetAgentID) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]string{"error": "peer call not allowed"})
+			writeJSONError(w, http.StatusForbidden, "peer call not allowed")
 			return
 		}
 		worker, ok := workers[req.TargetAgentID]
@@ -648,9 +576,7 @@ func main() {
 		if workContexts != nil && strings.TrimSpace(req.WorkContextID) != "" && strings.TrimSpace(req.WorkContextToken) != "" {
 			access, err := workContexts.AccessForToken(ctx, req.WorkContextID, req.WorkContextToken)
 			if err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				json.NewEncoder(w).Encode(map[string]string{"error": "work context unauthorized: " + err.Error()})
+				writeJSONError(w, http.StatusUnauthorized, "work context unauthorized: "+err.Error())
 				return
 			}
 			workAccess = access
@@ -662,14 +588,13 @@ func main() {
 			"depth":           req.Depth,
 		})
 		result, err := worker.Chat(ctx, peerDispatchMessages(worker, req.CallerAgentID, req.Reason, req.Content, workAccess))
-		w.Header().Set("Content-Type", "application/json")
 		if err != nil {
 			sageagents.AppendWorkContextEvent(ctx, "peer_response", req.TargetAgentID, "Peer consultation failed", err.Error(), map[string]interface{}{
 				"caller_agent_id": req.CallerAgentID,
 				"reason":          req.Reason,
 				"depth":           req.Depth + 1,
 			})
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			writeJSON(w, http.StatusOK, map[string]string{"error": err.Error()})
 			return
 		}
 		sageagents.AppendWorkContextEvent(ctx, "peer_response", req.TargetAgentID, "Peer consultation completed", result, map[string]interface{}{
@@ -678,7 +603,7 @@ func main() {
 			"depth":           req.Depth + 1,
 			"tool_calls":      worker.LastToolTrace(),
 		})
-		json.NewEncoder(w).Encode(map[string]string{"reply": result, "agent": req.TargetAgentID})
+		writeJSON(w, http.StatusOK, map[string]string{"reply": result, "agent": req.TargetAgentID})
 	})
 
 	// /agents/list — returns IDs of all registered worker agents.
@@ -687,8 +612,7 @@ func main() {
 		for id := range workers {
 			ids = append(ids, id)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ids)
+		writeJSON(w, http.StatusOK, ids)
 	})
 
 	mux.HandleFunc("/agents/catalog", func(w http.ResponseWriter, r *http.Request) {
@@ -696,8 +620,7 @@ func main() {
 			http.Error(w, "GET only", http.StatusMethodNotAllowed)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(cfg.BuildChatCatalog())
+		writeJSON(w, http.StatusOK, cfg.BuildChatCatalog())
 	})
 
 	registerAgentModelRoutes(mux, agentModelRuntime)
@@ -779,8 +702,7 @@ func main() {
 				return
 			}
 			log.Printf("<- [%s] (chat continuation) contextId=%s activeTaskId=%s content=%.60s...", active.ActiveRunID, body.ContextID, active.ActiveTaskID, body.Content)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{
+			writeJSON(w, http.StatusOK, map[string]string{
 				"taskId":       active.ActiveRunID,
 				"contextId":    body.ContextID,
 				"activeTaskId": active.ActiveTaskID,
@@ -848,20 +770,21 @@ func main() {
 		}
 		if err := rc.Publish(r.Context(), a2a.ChannelTasks, payload).Err(); err != nil {
 			if chatSessions != nil {
-				_ = chatSessions.UpsertTaskMessage(r.Context(), body.ContextID, sageagents.ChatTranscriptMessage{
+				if writeErr := chatSessions.UpsertTaskMessage(r.Context(), body.ContextID, sageagents.ChatTranscriptMessage{
 					Role:      "assistant",
 					Text:      "publish failed: " + err.Error(),
 					Status:    "error",
 					TaskID:    taskID,
 					CreatedAt: time.Now().UnixMilli(),
-				})
+				}); writeErr != nil {
+					log.Printf("[chat-sessions] write publish failure %s failed: %v", body.ContextID, writeErr)
+				}
 			}
 			http.Error(w, "publish failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		log.Printf("<- [%s] (chat) contextId=%s mode=%s target=%s content=%.60s...", taskID, body.ContextID, selection.AgentMode, selection.TargetAgentID, body.Content)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
+		writeJSON(w, http.StatusOK, map[string]string{
 			"taskId":       taskID,
 			"contextId":    body.ContextID,
 			"activeTaskId": activeTaskID,
@@ -909,8 +832,7 @@ func main() {
 			return
 		}
 		log.Printf("<- [%s] (chat/continue) decision=%s", body.TaskID, body.Decision)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
 	// /chat/stop cancels a currently running local chat task.
@@ -939,8 +861,7 @@ func main() {
 				chatActiveTasks.markRunStopped(r.Context(), active.ContextID, active.ActiveTaskID, body.TaskID)
 			}
 			log.Printf("<- [%s] (chat/stop) cancel requested", body.TaskID)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"status": "canceling"})
+			writeJSON(w, http.StatusOK, map[string]string{"status": "canceling"})
 			return
 		}
 		http.Error(w, "task is not active", http.StatusNotFound)
@@ -963,7 +884,11 @@ func main() {
 		w.Header().Set("X-Accel-Buffering", "no")
 
 		sub := rc.Subscribe(r.Context(), a2a.ChannelEvents, sageagents.ChannelErrors)
-		defer sub.Close()
+		defer func() {
+			if err := sub.Close(); err != nil {
+				log.Printf("Redis stream subscription close failed: %v", err)
+			}
+		}()
 
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
@@ -976,14 +901,24 @@ func main() {
 				}
 				// Wrap the payload with its source channel so the dashboard
 				// can route status-update vs artifact-update vs error.
-				envelope, _ := json.Marshal(map[string]string{
+				envelope, err := json.Marshal(map[string]string{
 					"channel": msg.Channel,
 					"payload": msg.Payload,
 				})
-				fmt.Fprintf(w, "data: %s\n\n", envelope)
+				if err != nil {
+					log.Printf("SSE envelope marshal failed: %v", err)
+					return
+				}
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", envelope); err != nil {
+					log.Printf("SSE write failed: %v", err)
+					return
+				}
 				flusher.Flush()
 			case <-ticker.C:
-				fmt.Fprintf(w, ": keepalive\n\n")
+				if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+					log.Printf("SSE keepalive write failed: %v", err)
+					return
+				}
 				flusher.Flush()
 			case <-r.Context().Done():
 				return
@@ -1025,8 +960,7 @@ func registerChatSessionRoutes(mux *http.ServeMux, store *sageagents.RedisChatSe
 				http.Error(w, "session list failed: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"sessions": sessions})
+			writeJSON(w, http.StatusOK, map[string]interface{}{"sessions": sessions})
 		case http.MethodPost:
 			var body struct {
 				ContextID string `json:"contextId"`
@@ -1047,8 +981,7 @@ func registerChatSessionRoutes(mux *http.ServeMux, store *sageagents.RedisChatSe
 				http.Error(w, "session create failed: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(session)
+			writeJSON(w, http.StatusOK, session)
 		default:
 			http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
 		}
@@ -1080,8 +1013,7 @@ func registerChatSessionRoutes(mux *http.ServeMux, store *sageagents.RedisChatSe
 				http.Error(w, "session load failed: "+err.Error(), status)
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(detail)
+			writeJSON(w, http.StatusOK, detail)
 		case http.MethodPatch:
 			var body struct {
 				Title         *string `json:"title"`
@@ -1122,15 +1054,13 @@ func registerChatSessionRoutes(mux *http.ServeMux, store *sageagents.RedisChatSe
 					return
 				}
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(session)
+			writeJSON(w, http.StatusOK, session)
 		case http.MethodDelete:
 			if err := store.Delete(r.Context(), contextID); err != nil {
 				http.Error(w, "session delete failed: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+			writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 		default:
 			http.Error(w, "GET, PATCH or DELETE only", http.StatusMethodNotAllowed)
 		}
@@ -1157,8 +1087,7 @@ func registerWorkContextRoutes(mux *http.ServeMux, store *sageagents.WorkContext
 			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
+		writeJSON(w, http.StatusOK, map[string]string{
 			"workContextId": access.ID,
 			"taskId":        access.TaskID,
 			"contextId":     access.ContextID,
@@ -1216,8 +1145,7 @@ func registerWorkContextRoutes(mux *http.ServeMux, store *sageagents.WorkContext
 				http.Error(w, "append failed: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(event)
+			writeJSON(w, http.StatusOK, event)
 			return
 		}
 		if len(parts) > 1 {
@@ -1242,8 +1170,7 @@ func registerWorkContextRoutes(mux *http.ServeMux, store *sageagents.WorkContext
 			http.Error(w, "work context read failed: "+err.Error(), status)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(detail)
+		writeJSON(w, http.StatusOK, detail)
 	})
 }
 
@@ -1314,8 +1241,7 @@ func registerWorkspaceRoutes(mux *http.ServeMux) {
 			return files[i]["name"].(string) < files[j]["name"].(string)
 		})
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"files":     files,
 			"path":      dir,
 			"rootLabel": filepath.Base(absRoot),
@@ -1366,7 +1292,6 @@ func registerWorkspaceRoutes(mux *http.ServeMux) {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("%s.zip", info.Name())))
 
 		zipWriter := zip.NewWriter(w)
-		defer zipWriter.Close()
 
 		err = filepath.Walk(fullPath, func(filePath string, fileInfo os.FileInfo, err error) error {
 			if err != nil {
@@ -1387,25 +1312,38 @@ func registerWorkspaceRoutes(mux *http.ServeMux) {
 			if err != nil {
 				return err
 			}
-			defer file.Close()
 
 			zipFileInfo, err := zip.FileInfoHeader(fileInfo)
 			if err != nil {
+				if closeErr := file.Close(); closeErr != nil {
+					log.Printf("workspace download file close failed: %v", closeErr)
+				}
 				return err
 			}
 			zipFileInfo.Name = relPath
 
 			zipFile, err := zipWriter.CreateHeader(zipFileInfo)
 			if err != nil {
+				if closeErr := file.Close(); closeErr != nil {
+					log.Printf("workspace download file close failed: %v", closeErr)
+				}
 				return err
 			}
 
-			_, err = io.Copy(zipFile, file)
-			return err
+			_, copyErr := io.Copy(zipFile, file)
+			closeErr := file.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			return closeErr
 		})
 
 		if err != nil {
 			log.Printf("Error creating zip: %v", err)
+			return
+		}
+		if err := zipWriter.Close(); err != nil {
+			log.Printf("Error finalizing zip: %v", err)
 		}
 	})
 }
@@ -1452,113 +1390,6 @@ func bearerToken(r *http.Request) string {
 	return ""
 }
 
-func registerProviderAuthRoutes(mux *http.ServeMux, stateDir, codexBridgeURL string) {
-	mux.HandleFunc("/providers/copilot/status", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(sageagents.CopilotAuthState(stateDir))
-	})
-
-	mux.HandleFunc("/providers/copilot/login/start", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		clientID := ""
-		var body struct {
-			ClientID string `json:"clientId"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if strings.TrimSpace(body.ClientID) != "" {
-			clientID = strings.TrimSpace(body.ClientID)
-		}
-		result, err := sageagents.StartGitHubDeviceLogin(clientID)
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
-	})
-
-	mux.HandleFunc("/providers/copilot/login/complete", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		clientID := ""
-		var body struct {
-			ClientID   string `json:"clientId"`
-			DeviceCode string `json:"deviceCode"`
-			Token      string `json:"token"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
-			return
-		}
-		if strings.TrimSpace(body.ClientID) != "" {
-			clientID = strings.TrimSpace(body.ClientID)
-		}
-		var err error
-		if strings.TrimSpace(body.Token) != "" {
-			err = sageagents.SaveGitHubOAuthToken(stateDir, body.Token)
-		} else {
-			err = sageagents.CompleteGitHubDeviceLogin(stateDir, clientID, body.DeviceCode)
-		}
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(sageagents.CopilotAuthState(stateDir))
-	})
-
-	mux.HandleFunc("/providers/copilot/logout", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		if err := sageagents.DeleteGitHubOAuthToken(stateDir); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(sageagents.CopilotAuthState(stateDir))
-	})
-
-	mux.HandleFunc("/providers/copilot/refresh", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		if _, err := sageagents.GetCopilotToken(stateDir); err != nil {
-			writeJSONError(w, http.StatusBadGateway, err.Error())
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(sageagents.CopilotAuthState(stateDir))
-	})
-
-	mux.HandleFunc("/providers/codex/status", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		status := sageagents.NewCodexBridgeClient(codexBridgeURL).Status(r.Context(), sageagents.DefaultCodexModel)
-		json.NewEncoder(w).Encode(status)
-	})
-}
-
-func writeJSONError(w http.ResponseWriter, status int, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
-}
-
 func issueManagerCapabilityToken(acpEndpoint, agentID string) (string, error) {
 	body := map[string]interface{}{
 		"sub": agentID,
@@ -1582,8 +1413,15 @@ func issueManagerCapabilityToken(acpEndpoint, agentID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("ACP token response body close failed: %v", err)
+		}
+	}()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read ACP token response: %w", err)
+	}
 	if resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("ACP token issue returned %d: %s", resp.StatusCode, respBody)
 	}

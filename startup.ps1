@@ -128,6 +128,77 @@ function Invoke-AnimatedDocker {
     }
 }
 
+function Stop-CodexBridge {
+    $connections = Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue
+    $processIds = @($connections | Select-Object -ExpandProperty OwningProcess -Unique | Where-Object { $_ -gt 0 })
+
+    if ($processIds.Count -eq 0) {
+        Write-Host "  codex bridge: no listener on port 8765" -ForegroundColor DarkGray
+        return
+    }
+
+    foreach ($processId in $processIds) {
+        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($null -eq $process) {
+            continue
+        }
+        Write-Host ("  stopping codex bridge process {0} ({1})" -f $process.Id, $process.ProcessName) -ForegroundColor DarkGray
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-CodexBridge {
+    param(
+        [string]$Label = "starting codex bridge"
+    )
+
+    $managerDir = Join-Path $repoRoot "services\manager"
+    $codexBin = "C:\Users\matta\AppData\Roaming\npm\codex.cmd"
+
+    $env:CODEX_BIN = $codexBin
+    $env:CODEX_BRIDGE_LISTEN_ADDR = "0.0.0.0:8765"
+    $env:CODEX_DEFAULT_MODEL = "gpt-5.5"
+
+    $process = Start-Process `
+        -FilePath "go.exe" `
+        -ArgumentList @("run", ".\cmd\codex-bridge") `
+        -WorkingDirectory $managerDir `
+        -WindowStyle Hidden `
+        -PassThru
+
+    $deadline = (Get-Date).AddSeconds(30)
+    $tick = 0
+    $startedAt = Get-Date
+    do {
+        Write-LoadingFrame -Label $Label -Tick $tick -StartedAt $startedAt
+        Start-Sleep -Milliseconds 500
+        $tick++
+        try {
+            $status = Invoke-RestMethod "http://127.0.0.1:8765/health?model=gpt-5.5" -TimeoutSec 5
+            if ($status.connected -and $status.probeOk) {
+                Write-Host ("`r  OK [{0}] {1} complete                    " -f ("#" * 32), $Label) -ForegroundColor Green
+                Write-Host ("  codex bridge: listening on 0.0.0.0:8765 pid={0}" -f $process.Id) -ForegroundColor Green
+                return
+            }
+        }
+        catch {
+            if ($process.HasExited) {
+                throw "codex bridge exited before health check passed"
+            }
+        }
+    } while ((Get-Date) -lt $deadline)
+
+    throw "codex bridge did not become healthy on port 8765"
+}
+
+function Invoke-StopCodexBridgeStep {
+    $label = "1/5 stopping codex bridge"
+    Write-Host ""
+    Write-Host (":: " + $label) -ForegroundColor Yellow
+    Stop-CodexBridge
+    Write-Host ("  OK [{0}] {1} complete" -f ("#" * 32), $label) -ForegroundColor Green
+}
+
 try {
     Write-ArtBlock -Title "SAGE NEXUS BOOT SEQUENCE" -Color Cyan -Art @(
         '   _________                         _   _                         ',
@@ -139,13 +210,17 @@ try {
         '                      __/ |                                        ',
         '                     |___/                                         ',
         '',
-        '  sequence: down -> build --no-cache -> up -d',
+        '  sequence: stop bridge -> down -> build --no-cache -> up -d -> start bridge',
         '  display : animated loading bars'
     )
 
-    Invoke-AnimatedDocker -Label "1/3 stopping compose stack" -DockerArgs @("compose", "down")
-    Invoke-AnimatedDocker -Label "2/3 building fresh images" -DockerArgs @("compose", "build", "--no-cache")
-    Invoke-AnimatedDocker -Label "3/3 starting stack detached" -DockerArgs @("compose", "up", "-d")
+    Invoke-StopCodexBridgeStep
+    Invoke-AnimatedDocker -Label "2/5 stopping compose stack" -DockerArgs @("compose", "down")
+    Invoke-AnimatedDocker -Label "3/5 building fresh images" -DockerArgs @("compose", "build", "--no-cache")
+    Invoke-AnimatedDocker -Label "4/5 starting stack detached" -DockerArgs @("compose", "up", "-d")
+    Write-Host ""
+    Write-Host ":: 5/5 starting codex bridge" -ForegroundColor Yellow
+    Start-CodexBridge -Label "5/5 starting codex bridge"
 
     Write-ArtBlock -Title "SAGE NEXUS STARTUP COMPLETE" -Color Green -Art @(
         '  [################################] 100%',
@@ -161,6 +236,7 @@ try {
         '',
         '  next checks:',
         '    docker compose ps',
+        '    http://localhost:8090/providers/codex/status',
         '    http://localhost:5174',
         '    http://localhost:8090/health'
     )

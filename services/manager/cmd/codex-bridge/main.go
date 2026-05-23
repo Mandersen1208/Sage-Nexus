@@ -90,17 +90,20 @@ func (s *bridgeServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if len(req.Tools) > 0 {
 		out, err = s.runCodexStructured(r.Context(), model, prompt)
-		out.Model = model
 	} else {
 		out.Text, err = s.runCodex(r.Context(), model, prompt)
 		out.FinishReason = "final"
 	}
-	out.DurationMS = time.Since(start).Milliseconds()
 	if err != nil {
-		out.Error = err.Error()
-		writeJSON(w, http.StatusBadGateway, out)
+		writeJSON(w, http.StatusBadGateway, sageagents.CodexBridgeChatResponse{
+			Model:      model,
+			DurationMS: time.Since(start).Milliseconds(),
+			Error:      err.Error(),
+		})
 		return
 	}
+	out.Model = model
+	out.DurationMS = time.Since(start).Milliseconds()
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -163,7 +166,11 @@ func (s *bridgeServer) runCodexStructured(ctx context.Context, model, prompt str
 	if err != nil {
 		return sageagents.CodexBridgeChatResponse{}, err
 	}
-	defer os.Remove(schemaPath)
+	defer func() {
+		if err := os.Remove(schemaPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("temporary Codex schema cleanup failed: %v", err)
+		}
+	}()
 
 	runCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -201,7 +208,7 @@ func runCodexWithSchema(ctx context.Context, bin, model, prompt, schemaPath stri
 }
 
 func runCodexArgs(ctx context.Context, bin, model, prompt string, extra []string) (string, error) {
-	args := []string{"exec", "--model", model, "--sandbox", "read-only"}
+	args := []string{"exec", "--ignore-user-config", "--model", model, "--sandbox", "read-only"}
 	args = append(args, extra...)
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdin = strings.NewReader(prompt)
@@ -255,9 +262,13 @@ func buildCodexPrompt(model, system string, messages []sageagents.ChatMessage, t
 		b.WriteString("\n")
 	}
 	if len(tools) > 0 {
-		encoded, _ := json.MarshalIndent(tools, "", "  ")
 		b.WriteString("\nAvailable manager-mediated tools:\n")
-		b.Write(encoded)
+		encoded, err := json.MarshalIndent(tools, "", "  ")
+		if err != nil {
+			log.Printf("Codex bridge tool prompt encoding failed: %v", err)
+		} else {
+			b.WriteString(string(encoded))
+		}
 		b.WriteString("\n")
 		b.WriteString("\nResponse contract: return JSON matching the supplied schema. Use final_text for a final answer, or tool_calls when you need tool results.\n")
 	}
@@ -380,7 +391,9 @@ func parseStructuredCodexOutput(model, raw string) (sageagents.CodexBridgeChatRe
 func writeJSON(w http.ResponseWriter, status int, body interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		log.Printf("bridge JSON response write failed: %v", err)
+	}
 }
 
 func envOr(key, def string) string {

@@ -100,14 +100,77 @@ func TestShouldRejectDirectOrchestratorReply(t *testing.T) {
 	}
 }
 
-func TestFallbackRouteWorkerIDPrefersProjectManager(t *testing.T) {
+func TestFallbackRouteWorkerIDPrefersImplementationForDelivery(t *testing.T) {
 	orch := &SageOrchestratorAgent{Workers: map[string]*CopilotAgent{
 		defaultSageAutoFallbackWorkerID: {BaseAgent: BaseAgent{AgentID: defaultSageAutoFallbackWorkerID}},
+		"AGT-frontend-dev-agent":        {BaseAgent: BaseAgent{AgentID: "AGT-frontend-dev-agent"}},
 		SeniorDevAgentID:                {BaseAgent: BaseAgent{AgentID: SeniorDevAgentID}},
 	}}
 
-	if got := orch.fallbackRouteWorkerID(); got != defaultSageAutoFallbackWorkerID {
+	if got := orch.fallbackRouteWorkerID("make me an application"); got != "AGT-frontend-dev-agent" {
+		t.Fatalf("fallbackRouteWorkerID() = %q, want AGT-frontend-dev-agent", got)
+	}
+	if got := orch.fallbackRouteWorkerID("plan the next phase"); got != defaultSageAutoFallbackWorkerID {
 		t.Fatalf("fallbackRouteWorkerID() = %q, want %q", got, defaultSageAutoFallbackWorkerID)
+	}
+}
+
+func TestRequiresImplementationWorker(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "application creation", input: "make me an application", want: true},
+		{name: "frontend implementation", input: "implement the chat UI", want: true},
+		{name: "planning only", input: "plan the next phase", want: false},
+		{name: "architecture discussion", input: "what architecture should this use?", want: false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := requiresImplementationWorker(tc.input); got != tc.want {
+				t.Fatalf("requiresImplementationWorker(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTrackerHasImplementationWorker(t *testing.T) {
+	tracker := NewHandoffTracker()
+	tracker.Add(AgentHandoff{AgentID: OrchestratorAgentID, Role: "orchestrator"})
+	tracker.Add(AgentHandoff{AgentID: defaultSageAutoFallbackWorkerID, Role: "worker"})
+	tracker.Add(AgentHandoff{AgentID: SeniorDevAgentID, Role: "review_gate"})
+	if trackerHasImplementationWorker(tracker) {
+		t.Fatal("PM plus senior review gate should not count as implementation")
+	}
+
+	tracker.Add(AgentHandoff{AgentID: "AGT-frontend-dev-agent", Role: "worker"})
+	if !trackerHasImplementationWorker(tracker) {
+		t.Fatal("frontend worker should count as implementation")
+	}
+}
+
+func TestFallbackImplementationWorkerID(t *testing.T) {
+	orch := &SageOrchestratorAgent{Workers: map[string]*CopilotAgent{
+		"AGT-frontend-dev-agent":        {BaseAgent: BaseAgent{AgentID: "AGT-frontend-dev-agent"}},
+		"AGT-backend-dev-agent":         {BaseAgent: BaseAgent{AgentID: "AGT-backend-dev-agent"}},
+		"AGT-devops-agent":              {BaseAgent: BaseAgent{AgentID: "AGT-devops-agent"}},
+		"AGT-database-admin-agent":      {BaseAgent: BaseAgent{AgentID: "AGT-database-admin-agent"}},
+		"AGT-office-document-agent":     {BaseAgent: BaseAgent{AgentID: "AGT-office-document-agent"}},
+		defaultSageAutoFallbackWorkerID: {BaseAgent: BaseAgent{AgentID: defaultSageAutoFallbackWorkerID}},
+	}}
+	if got := orch.fallbackImplementationWorkerID("make me an application"); got != "AGT-frontend-dev-agent" {
+		t.Fatalf("application fallback = %q", got)
+	}
+	if got := orch.fallbackImplementationWorkerID("fix the backend endpoint"); got != "AGT-backend-dev-agent" {
+		t.Fatalf("backend fallback = %q", got)
+	}
+	if got := orch.fallbackImplementationWorkerID("update docker compose"); got != "AGT-devops-agent" {
+		t.Fatalf("devops fallback = %q", got)
+	}
+	if got := orch.fallbackImplementationWorkerID("create a docx report"); got != "AGT-office-document-agent" {
+		t.Fatalf("office fallback = %q", got)
 	}
 }
 

@@ -40,11 +40,6 @@ function statusMessageText(evt: TaskStatusUpdateEvent): string {
   );
 }
 
-function metadataActivity(evt: TaskStatusUpdateEvent): string {
-  const activity = evt.metadata?.activity;
-  return typeof activity === "string" ? activity : "";
-}
-
 function isTerminalState(state: TaskTimeline["state"]): boolean {
   return (
     state === "completed" ||
@@ -132,12 +127,10 @@ export function useStream(): StreamState {
 
             if (isStatusUpdate(evt)) {
               const nextState = nextTimelineState(existing.state, evt.status.state);
-              const deltaText = metadataActivity(evt) === "model_delta" ? statusMessageText(evt) : "";
               const next: TaskTimeline = {
                 ...existing,
                 state: nextState,
                 events: [...existing.events, evt],
-                liveText: deltaText ? `${existing.liveText ?? ""}${deltaText}` : existing.liveText,
                 lastEventAt: now,
               };
               if (evt.status.state === "failed" || evt.status.state === "canceled" || evt.status.state === "rejected") {

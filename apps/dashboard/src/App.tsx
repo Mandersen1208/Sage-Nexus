@@ -1,9 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import ChatPage from "./Chat.js";
-import AgentModelsPage from "./AgentModelsPage.js";
-import SettingsPage from "./SettingsPage.js";
-import FilesPage from "./FilesPage.js";
-import SkillsPage from "./SkillsPage.js";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { sendContinue } from "./api.js";
 import { useStream, type StreamState } from "./hooks/useStream.js";
 import type {
@@ -18,6 +13,12 @@ import type {
 import "./App.css";
 
 type Route = "chat" | "dashboard" | "models" | "settings" | "files" | "skills";
+
+const ChatPage = lazy(() => import("./Chat.js"));
+const AgentModelsPage = lazy(() => import("./AgentModelsPage.js"));
+const SettingsPage = lazy(() => import("./SettingsPage.js"));
+const FilesPage = lazy(() => import("./FilesPage.js"));
+const SkillsPage = lazy(() => import("./SkillsPage.js"));
 
 function currentRoute(): Route {
   if (window.location.pathname.startsWith("/settings")) return "settings";
@@ -187,18 +188,32 @@ export default function App() {
           onSelect={setSelectedId}
         />
       ) : route === "models" ? (
-        <AgentModelsPage />
+        <Suspense fallback={<PageLoading />}>
+          <AgentModelsPage />
+        </Suspense>
       ) : route === "settings" ? (
-        <SettingsPage />
+        <Suspense fallback={<PageLoading />}>
+          <SettingsPage />
+        </Suspense>
       ) : route === "files" ? (
-        <FilesPage />
+        <Suspense fallback={<PageLoading />}>
+          <FilesPage />
+        </Suspense>
       ) : route === "skills" ? (
-        <SkillsPage />
+        <Suspense fallback={<PageLoading />}>
+          <SkillsPage />
+        </Suspense>
       ) : (
-        <ChatPage stream={stream} onOpenTask={openTask} />
+        <Suspense fallback={<PageLoading />}>
+          <ChatPage stream={stream} onOpenTask={openTask} />
+        </Suspense>
       )}
     </div>
   );
+}
+
+function PageLoading() {
+  return <main className="page-loading">Loading...</main>;
 }
 
 function buildMergedRequests({ tasks, logs }: StreamState): MergedRequest[] {

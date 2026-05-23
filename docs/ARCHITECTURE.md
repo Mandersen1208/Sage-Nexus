@@ -39,6 +39,9 @@ The default SOUL path remains `/home/node/.openclaw/workspace/SOUL.md` for compa
 
 The bundled registry remains in `services/manager/config/agents.json`. A workspace registry can overlay it through `SAGE_AGENT_REGISTRY_FILE`, defaulting to `/sage-state/workspace/sage/agents.registry.json`.
 
+The manager-owned registry and prompt files are the only bundled runtime source
+of truth. Example configs live under `examples/` and are not loaded by default.
+
 Adding an agent should remain registry-driven:
 
 - prompt file

@@ -85,7 +85,11 @@ func (a *SageOrchestratorAgent) StartErrorSubscriber(ctx context.Context, rc *re
 
 	go func() {
 		ps := rc.Subscribe(ctx, ChannelErrors)
-		defer ps.Close()
+		defer func() {
+			if err := ps.Close(); err != nil {
+				log.Printf("[orchestrator] error subscriber close failed: %v", err)
+			}
+		}()
 		log.Printf("[orchestrator] subscribed to %s (buffer=%d)", ChannelErrors, a.errorMaxSize)
 		for {
 			msg, err := ps.ReceiveMessage(ctx)
@@ -284,6 +288,9 @@ func (a *SageOrchestratorAgent) Orchestrate(ctx context.Context, input string, t
 	EmitLatencySpan(ctx, "orchestrator_route_model", start)
 	if err != nil {
 		return reply, err
+	}
+	if a.shouldContinueToImplementation(input, tracker) {
+		return a.dispatchImplementationFallback(ctx, input, reply, tracker)
 	}
 	if !shouldRejectDirectOrchestratorReply(input, a.LastRouterTrace()) {
 		return reply, nil
@@ -516,7 +523,11 @@ func (a *SageOrchestratorAgent) routeTools() []toolDef {
 	if a.Registry == nil {
 		return nil
 	}
-	routes, _ := a.Registry.BuildOrchestratorRoutes()
+	routes, err := a.Registry.BuildOrchestratorRoutes()
+	if err != nil {
+		log.Printf("[orchestrator] build route tools failed: %v", err)
+		return nil
+	}
 	a.RouteTools = routes.Tools
 	a.RouteTargets = routes.Targets
 	return a.RouteTools
@@ -529,7 +540,11 @@ func (a *SageOrchestratorAgent) routeTargets() map[string]string {
 	if a.Registry == nil {
 		return map[string]string{}
 	}
-	routes, _ := a.Registry.BuildOrchestratorRoutes()
+	routes, err := a.Registry.BuildOrchestratorRoutes()
+	if err != nil {
+		log.Printf("[orchestrator] build route targets failed: %v", err)
+		return map[string]string{}
+	}
 	a.RouteTools = routes.Tools
 	a.RouteTargets = routes.Targets
 	return a.RouteTargets
@@ -611,7 +626,7 @@ func shouldRejectDirectOrchestratorReply(input string, routeTrace []string) bool
 }
 
 func (a *SageOrchestratorAgent) dispatchRequiredRouteFallback(ctx context.Context, input string, tracker *HandoffTracker) (string, error) {
-	workerID := a.fallbackRouteWorkerID()
+	workerID := a.fallbackRouteWorkerID(input)
 	if workerID == "" {
 		return "", fmt.Errorf("route-required request had no available fallback worker")
 	}
@@ -621,17 +636,56 @@ func (a *SageOrchestratorAgent) dispatchRequiredRouteFallback(ctx context.Contex
 		"worker":   workerID,
 		"fallback": true,
 	})
-	return a.DispatchWorker(ctx, workerID, currentRouteRequest(input), tracker, WorkerDispatchOptions{
+	result, err := a.DispatchWorker(ctx, workerID, currentRouteRequest(input), tracker, WorkerDispatchOptions{
 		Mode:              "auto_required_route_fallback",
+		RouteTool:         routeTool,
+		SuppressPeerTools: false,
+		EnforceSeniorGate: true,
+	})
+	if err != nil {
+		return result, err
+	}
+	if a.shouldContinueToImplementation(input, tracker) {
+		return a.dispatchImplementationFallback(ctx, input, result, tracker)
+	}
+	return result, nil
+}
+
+func (a *SageOrchestratorAgent) shouldContinueToImplementation(input string, tracker *HandoffTracker) bool {
+	if !requiresImplementationWorker(input) || tracker == nil {
+		return false
+	}
+	return trackerHasWorker(tracker) && !trackerHasImplementationWorker(tracker)
+}
+
+func (a *SageOrchestratorAgent) dispatchImplementationFallback(ctx context.Context, input, planningOutput string, tracker *HandoffTracker) (string, error) {
+	workerID := a.fallbackImplementationWorkerID(input)
+	if workerID == "" {
+		return "", fmt.Errorf("delivery request reached planning/review but no implementation worker is configured")
+	}
+	routeTool := a.routeToolNameForWorker(workerID)
+	query := implementationFallbackQuery(input, planningOutput)
+	AppendWorkContextEvent(ctx, "orchestrator_route", a.AgentID, "Delivery request continued to deterministic implementation worker", planningOutput, map[string]interface{}{
+		"tool":     routeTool,
+		"worker":   workerID,
+		"fallback": true,
+	})
+	return a.DispatchWorker(ctx, workerID, query, tracker, WorkerDispatchOptions{
+		Mode:              "auto_required_implementation_fallback",
 		RouteTool:         routeTool,
 		SuppressPeerTools: false,
 		EnforceSeniorGate: true,
 	})
 }
 
-func (a *SageOrchestratorAgent) fallbackRouteWorkerID() string {
+func (a *SageOrchestratorAgent) fallbackRouteWorkerID(input string) string {
 	if a == nil || len(a.Workers) == 0 {
 		return ""
+	}
+	if requiresImplementationWorker(input) {
+		if workerID := a.fallbackImplementationWorkerID(input); workerID != "" {
+			return workerID
+		}
 	}
 	if worker := a.Workers[defaultSageAutoFallbackWorkerID]; worker != nil {
 		return defaultSageAutoFallbackWorkerID
@@ -641,6 +695,32 @@ func (a *SageOrchestratorAgent) fallbackRouteWorkerID() string {
 	}
 	for id, worker := range a.Workers {
 		if strings.TrimSpace(id) != "" && worker != nil {
+			return id
+		}
+	}
+	return ""
+}
+
+func (a *SageOrchestratorAgent) fallbackImplementationWorkerID(input string) string {
+	if a == nil || len(a.Workers) == 0 {
+		return ""
+	}
+	normalized := normalizeRouteRequest(input)
+	candidates := []string{}
+	switch {
+	case containsAny(normalized, []string{"api", "backend", "server", "endpoint", "service"}):
+		candidates = []string{"AGT-backend-dev-agent", "AGT-frontend-dev-agent"}
+	case containsAny(normalized, []string{"docker", "compose", "deploy", "deployment", "ci", "runtime", "container"}):
+		candidates = []string{"AGT-devops-agent", "AGT-backend-dev-agent"}
+	case containsAny(normalized, []string{"database", "schema", "migration", "sql", "postgres"}):
+		candidates = []string{"AGT-database-admin-agent", "AGT-backend-dev-agent"}
+	case containsAny(normalized, []string{"docx", "xlsx", "spreadsheet", "workbook", "calendar", "ics", "document"}):
+		candidates = []string{"AGT-office-document-agent"}
+	default:
+		candidates = []string{"AGT-frontend-dev-agent", "AGT-backend-dev-agent"}
+	}
+	for _, id := range candidates {
+		if worker := a.Workers[id]; worker != nil {
 			return id
 		}
 	}
@@ -660,10 +740,86 @@ func requiresOrchestratorWorkerRoute(input string) bool {
 	return isDeliveryWorkRequest(input)
 }
 
+func requiresImplementationWorker(input string) bool {
+	normalized := normalizeRouteRequest(input)
+	if normalized == "" {
+		return false
+	}
+	if isApplicationCreationRequest(normalized) {
+		return true
+	}
+	if containsAnyWord(normalized, []string{
+		"add",
+		"apply",
+		"build",
+		"change",
+		"configure",
+		"create",
+		"delete",
+		"deploy",
+		"edit",
+		"fix",
+		"generate",
+		"implement",
+		"install",
+		"migrate",
+		"rebuild",
+		"refactor",
+		"remove",
+		"repair",
+		"restart",
+		"update",
+		"write",
+	}) {
+		return true
+	}
+	return false
+}
+
+func trackerHasImplementationWorker(tracker *HandoffTracker) bool {
+	if tracker == nil {
+		return false
+	}
+	for _, handoff := range tracker.Handoffs() {
+		if handoff.Role != "worker" {
+			continue
+		}
+		switch handoff.AgentID {
+		case "AGT-frontend-dev-agent",
+			"AGT-backend-dev-agent",
+			"AGT-devops-agent",
+			"AGT-database-admin-agent",
+			"AGT-office-document-agent":
+			return true
+		}
+	}
+	return false
+}
+
+func trackerHasWorker(tracker *HandoffTracker) bool {
+	if tracker == nil {
+		return false
+	}
+	for _, handoff := range tracker.Handoffs() {
+		if handoff.Role == "worker" {
+			return true
+		}
+	}
+	return false
+}
+
 func requiredWorkerRouteInstruction(input string) string {
 	return "This user request requires manager/orchestrator execution through worker route tools. " +
 		"Do not answer directly from orchestrator knowledge. Call the appropriate route tool before producing any final response. " +
 		"Original request: " + normalizeRouteRequest(input)
+}
+
+func implementationFallbackQuery(input, planningOutput string) string {
+	query := "Continue this delivery request into implementation. Do not stop at planning.\n\nOriginal request:\n" + currentRouteRequest(input)
+	if strings.TrimSpace(planningOutput) != "" {
+		query += "\n\nPlanning/review output so far:\n" + strings.TrimSpace(planningOutput)
+	}
+	return query
 }
 
 func currentRouteRequest(query string) string {

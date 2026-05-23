@@ -20,7 +20,9 @@ Install and sign in to Codex on the Windows host:
 codex
 ```
 
-The first run should prompt for ChatGPT sign-in. After sign-in, start the bridge:
+The first run should prompt for ChatGPT sign-in. The root `startup.ps1` starts
+and stops the bridge as part of the normal local Docker lifecycle. To start the
+bridge manually:
 
 ```powershell
 cd C:\Users\matta\code\sage-nexus\services\manager
@@ -32,6 +34,8 @@ Default bridge settings:
 - Listen address: `127.0.0.1:8765`
 - Model: `gpt-5.5`
 - Codex binary: `codex` from `PATH`, or `CODEX_BIN` if set
+- Codex execution uses `--ignore-user-config` so the bridge uses local auth
+  without depending on desktop plugin marketplace sync.
 
 Useful overrides:
 

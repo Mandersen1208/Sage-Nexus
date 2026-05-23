@@ -41,9 +41,6 @@ Core calls live in `src/api.ts`:
 - Add Tool modal includes manager-chat-assisted drafting with session continuity.
 - Skills page is the primary governance page (local skills + discovered server skills).
 - Settings no longer hosts full skill governance workflows.
-- Chat renders live model deltas in one bottom "Live output" box above the
-  composer. Those deltas are volatile display state; final assistant messages
-  still come from completed task artifacts or persisted chat transcript rows.
 
 ## Validation
 
