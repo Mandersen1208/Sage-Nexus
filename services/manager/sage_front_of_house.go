@@ -147,9 +147,9 @@ func (r *SageRunner) BuildAutoOrchestrationInput(
 	decision := sageRouteDecision{
 		Direct: false,
 		Mode:   "delegate",
-		Reason: "sage_auto_routes_to_orchestrator",
+		Reason: "sage_auto_routes_to_manager_router",
 	}
-	AppendWorkContextEvent(ctx, "sage_route", SageAgentID, "Sage Auto routed to manager/orchestrator", "", map[string]interface{}{
+	AppendWorkContextEvent(ctx, "sage_route", SageAgentID, "Sage Auto routed to manager router", "", map[string]interface{}{
 		"mode":   decision.Mode,
 		"reason": decision.Reason,
 		"direct": decision.Direct,

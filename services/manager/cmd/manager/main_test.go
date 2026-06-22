@@ -45,6 +45,12 @@ func TestRegistryControlledToolExposure(t *testing.T) {
 	if !hasTool(backendTools, "agent_context_read") || !hasTool(backendTools, "agent_context_append") {
 		t.Fatalf("backend agent should have work context tools")
 	}
+	if !hasTool(backendTools, "handoff_to_agent") || !hasTool(backendTools, "complete_task") {
+		t.Fatalf("backend agent should have agent-owned handoff tools")
+	}
+	if hasTool(backendTools, "call_agent") {
+		t.Fatalf("legacy call_agent should not be exposed by default: %v", backendTools)
+	}
 
 	officeTools := filteredRegistryTools(t, cfg, available, "AGT-office-document-agent")
 	for _, tool := range []string{"office_docx_create", "office_xlsx_create", "office_artifact_list", "agent_context_read"} {
@@ -94,7 +100,7 @@ func TestRegistryToolExposureMeshCanBeDisabled(t *testing.T) {
 	sageagents.ConfigurePeerPolicy(cfg.PeerPolicy())
 
 	tools := filteredRegistryTools(t, cfg, registryToolSet(cfg), "AGT-frontend-dev-agent")
-	if hasTool(tools, "list_agents") || hasTool(tools, "call_agent") {
+	if hasTool(tools, "list_agents") || hasTool(tools, "call_agent") || hasTool(tools, "handoff_to_agent") || hasTool(tools, "complete_task") {
 		t.Fatalf("frontend agent got peer mesh tools while disabled: %v", tools)
 	}
 }
@@ -120,8 +126,33 @@ func TestRuntimeLibrarianToolsOnlyRuntimeInventory(t *testing.T) {
 			t.Fatalf("runtime librarian missing %s in %v", tool, tools)
 		}
 	}
-	if hasTool(tools, "skill_search") || hasTool(tools, "searxng_search") || hasTool(tools, "list_agents") || hasTool(tools, "call_agent") {
+	if hasTool(tools, "skill_search") || hasTool(tools, "searxng_search") || hasTool(tools, "list_agents") || hasTool(tools, "call_agent") || hasTool(tools, "handoff_to_agent") {
 		t.Fatalf("runtime librarian should not have broad tools: %v", tools)
+	}
+}
+
+func TestInitialRouteDecision(t *testing.T) {
+	cfg := mustLoadTestRegistry(t)
+	tests := []struct {
+		name      string
+		request   string
+		wantRoute string
+		wantAgent string
+	}{
+		{name: "casual sage", request: "hey", wantRoute: "sage"},
+		{name: "finance", request: "what did we spend on groceries?", wantRoute: "agent", wantAgent: "AGT-financial-agent"},
+		{name: "application build starts architect", request: "make me an application", wantRoute: "agent", wantAgent: "AGT-architect-agent"},
+		{name: "code review starts senior", request: "do a code review of this", wantRoute: "agent", wantAgent: "AGT-senior-dev-agent"},
+		{name: "docker starts devops", request: "fix docker compose networking", wantRoute: "agent", wantAgent: "AGT-devops-agent"},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := decideInitialRoute(cfg, tc.request)
+			if got.Target != tc.wantRoute || got.AgentID != tc.wantAgent {
+				t.Fatalf("decideInitialRoute(%q) = target %q agent %q, want target %q agent %q", tc.request, got.Target, got.AgentID, tc.wantRoute, tc.wantAgent)
+			}
+		})
 	}
 }
 

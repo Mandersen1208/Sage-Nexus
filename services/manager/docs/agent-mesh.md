@@ -7,11 +7,12 @@ This document is the cleanup-phase map for Sage's bounded agent mesh.
 Sage uses a bounded peer mesh, not an open swarm and not a strict hierarchy.
 
 - Sage front-of-house owns the human conversation.
-- Orchestrator chooses the first owner for a task.
+- The manager initial router chooses the first owner for a task.
 - Sage Nexus can explicitly target a registry-listed agent in Only or Flow mode.
 - Domain agents own their specialty and may push back.
-- Peer calls are consultations, not ownership transfers.
-- Senior Dev owns quality approval for delivery work.
+- Agent handoffs are ownership transfers for the next task slice.
+- Legacy peer calls are still available only when explicitly exposed, but the default mesh uses `handoff_to_agent`.
+- Senior Dev owns review quality and risk judgment, not a mandatory approval gate.
 - Architect owns architecture shape and durable architecture documents.
 - Research owns external/current evidence.
 - Runtime Librarian owns inventory and architecture record indexing.
@@ -37,16 +38,16 @@ Sage uses a bounded peer mesh, not an open swarm and not a strict hierarchy.
 
 | Agent group | Tools |
 | --- | --- |
-| PM | skills, web search, work context, bounded peer calls |
-| Architect | skills, runtime inventory, work context, bounded peer calls |
-| Senior Dev | skills, web search, runtime inventory, work context, bounded peer calls |
-| Frontend/Backend/DevOps/DBA/QA | skills, work context, bounded peer calls |
+| PM | skills, web search, work context, agent handoff |
+| Architect | skills, runtime inventory, work context, agent handoff |
+| Senior Dev | skills, web search, runtime inventory, work context, agent handoff |
+| Frontend/Backend/DevOps/DBA/QA | skills, work context, agent handoff |
 | Research | skills, web search, work context |
 | Runtime Librarian | runtime inventory, work context |
 | Office Document | Office artifact tools, work context |
 | Financial | skills, web search, budget tools, work context |
 
-Tool exposure is registry-driven. `toolBundles` and explicit `tools` define the requested MCP tools; manager startup discovers actual MCP schemas through `tools/list` and withholds unavailable tools. Peer mesh tools are controlled by `SAGE_AGENT_MESH_ENABLED` plus registry `peerTargets`. `SAGE_AGENT_MESH_MAX_DEPTH` can globally limit nested peer calls.
+Tool exposure is registry-driven. `toolBundles` and explicit `tools` define the requested MCP tools; manager startup discovers actual MCP schemas through `tools/list` and withholds unavailable tools. Handoff tools are controlled by `SAGE_AGENT_MESH_ENABLED` plus registry `peerTargets`. `SAGE_AGENT_MESH_MAX_DEPTH` can globally limit nested handoffs.
 
 ## Targeted Chat Modes
 
@@ -54,9 +55,9 @@ Sage Nexus reads `GET /agents/catalog` and does not hardcode agent names, labels
 
 | Mode | Behavior |
 | --- | --- |
-| `auto` | Sage front-of-house decides whether to answer directly or route through the mesh. |
+| `auto` | Sage frames the request, the manager picks the first owner, agents hand off through shared work context, and Sage revoices the final result. |
 | `solo` | User-facing label: Only. The selected agent answers directly. Peer dispatch tools are suppressed. |
-| `launch` | User-facing label: Flow. The selected agent owns the flow. Registry peer policy and Senior Dev gate still apply. |
+| `launch` | User-facing label: Flow. The selected agent owns the flow and can hand off to allowlisted peers. |
 
 Registry fields `targetable`, `displayName`, `supportedChatModes`, `modeLabels`, and `modeDescriptions` drive the catalog. Sage supports `auto` and `solo`; workers can support `solo` and `launch`; non-owning agents like Librarian can be exposed as `solo` only.
 
@@ -93,14 +94,13 @@ The Research agent should append `research_brief` to Agent Work Context with sou
 ## Runtime Evidence Flow
 
 1. User asks Sage.
-2. Orchestrator picks the owning specialist.
+2. Manager initial router picks the first owning specialist or Sage.
 3. Owning specialist reads Agent Work Context.
-4. If runtime truth matters, Architect/Senior Dev use runtime inventory.
-5. If external/current facts matter, owning specialist calls Research.
-6. If domain boundaries cross, owning specialist calls an allowlisted peer.
-7. Peer findings are recorded as `peer_request`, `peer_response`, `domain_pushback`, or `research_brief`.
-8. Senior Dev gates delivery work.
-9. Runtime Librarian indexes approved architecture records when asked.
+4. If another owner is needed, the current agent appends context and calls `handoff_to_agent`.
+5. The manager publishes the handoff event and dispatches the next in-process agent with the same tokenized work context.
+6. This continues until an agent calls `complete_task` or returns a final result with no accepted handoff.
+7. Sage revoices the final result for the user.
+8. Runtime Librarian indexes approved architecture records when asked.
 
 ## Cleanup Watch List
 

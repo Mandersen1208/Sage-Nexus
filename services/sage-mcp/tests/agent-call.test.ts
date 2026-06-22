@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { callAgent } from "../src/tools/agent-call.js";
+import { callAgent, completeTask, handoffToAgent } from "../src/tools/agent-call.js";
 
 async function readBody(req: IncomingMessage): Promise<string> {
   return await new Promise((resolve) => {
@@ -19,11 +19,23 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 
 let received: Record<string, unknown> | undefined;
 const server = createServer(async (req, res) => {
-  if (req.method !== "POST" || req.url !== "/agent-dispatch") {
+  if (req.method !== "POST") {
     json(res, 404, { error: "not found" });
     return;
   }
   received = JSON.parse(await readBody(req)) as Record<string, unknown>;
+  if (req.url === "/agent-handoff") {
+    json(res, 202, { accepted: true, agent: received["target_agent_id"] });
+    return;
+  }
+  if (req.url === "/agent-complete") {
+    json(res, 200, { completed: true, agent: received["caller_agent_id"] });
+    return;
+  }
+  if (req.url !== "/agent-dispatch") {
+    json(res, 404, { error: "not found" });
+    return;
+  }
   if (received["target_agent_id"] === "AGT-runtime-librarian-agent") {
     json(res, 403, { error: "peer call not allowed" });
     return;
@@ -60,6 +72,35 @@ const denied = await callAgent({
   reason: "invalid ownership transfer",
 });
 assert.equal(denied.error, "peer call not allowed");
+
+const handoff = await handoffToAgent({
+  caller_agent_id: "AGT-architect-agent",
+  task_id: "task-123",
+  agent_id: "AGT-backend-dev-agent",
+  query: "Implement the API slice.",
+  reason: "backend owns API behavior",
+  summary: "Architecture context is ready.",
+  depth: 0,
+  work_context_id: "wc-test",
+  token: "wct-test",
+});
+assert.equal(handoff.accepted, true);
+assert.equal(received?.["task_id"], "task-123");
+assert.equal(received?.["target_agent_id"], "AGT-backend-dev-agent");
+assert.equal(received?.["summary"], "Architecture context is ready.");
+
+const complete = await completeTask({
+  caller_agent_id: "AGT-backend-dev-agent",
+  task_id: "task-123",
+  summary: "Backend slice complete.",
+  result: "Implemented API behavior.",
+  depth: 1,
+  work_context_id: "wc-test",
+  token: "wct-test",
+});
+assert.equal(complete.completed, true);
+assert.equal(received?.["caller_agent_id"], "AGT-backend-dev-agent");
+assert.equal(received?.["result"], "Implemented API behavior.");
 
 server.close();
 console.log("agent call tests passed");

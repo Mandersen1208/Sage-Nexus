@@ -10,12 +10,12 @@ func TestRequiresSeniorGate(t *testing.T) {
 		workerID string
 		want     bool
 	}{
-		{name: "frontend gated", workerID: "AGT-frontend-dev-agent", want: true},
-		{name: "backend gated", workerID: "AGT-backend-dev-agent", want: true},
-		{name: "devops gated", workerID: "AGT-devops-agent", want: true},
-		{name: "qa gated", workerID: "AGT-qa-agent", want: true},
-		{name: "dba gated", workerID: "AGT-database-admin-agent", want: true},
-		{name: "architect gated", workerID: "AGT-architect-agent", want: true},
+		{name: "frontend not gated", workerID: "AGT-frontend-dev-agent", want: false},
+		{name: "backend not gated", workerID: "AGT-backend-dev-agent", want: false},
+		{name: "devops not gated", workerID: "AGT-devops-agent", want: false},
+		{name: "qa not gated", workerID: "AGT-qa-agent", want: false},
+		{name: "dba not gated", workerID: "AGT-database-admin-agent", want: false},
+		{name: "architect not gated", workerID: "AGT-architect-agent", want: false},
 		{name: "project manager not gated", workerID: "AGT-project-manager-agent", want: false},
 		{name: "senior not gated", workerID: SeniorDevAgentID, want: false},
 		{name: "research not gated", workerID: "AGT-research-agent", want: false},
@@ -43,11 +43,11 @@ func TestRequiresSeniorGateForRequest(t *testing.T) {
 		query    string
 		want     bool
 	}{
-		{name: "frontend implementation gated", workerID: "AGT-frontend-dev-agent", query: "implement the mobile chat layout", want: true},
-		{name: "application creation gated", workerID: "AGT-frontend-dev-agent", query: "make me an application", want: true},
-		{name: "backend fix gated", workerID: "AGT-backend-dev-agent", query: "fix the session delete route", want: true},
-		{name: "devops deploy gated", workerID: "AGT-devops-agent", query: "deploy the compose update", want: true},
-		{name: "architect document gated", workerID: "AGT-architect-agent", query: "create an architecture document", want: true},
+		{name: "frontend implementation not gated", workerID: "AGT-frontend-dev-agent", query: "implement the mobile chat layout", want: false},
+		{name: "application creation not gated", workerID: "AGT-frontend-dev-agent", query: "make me an application", want: false},
+		{name: "backend fix not gated", workerID: "AGT-backend-dev-agent", query: "fix the session delete route", want: false},
+		{name: "devops deploy not gated", workerID: "AGT-devops-agent", query: "deploy the compose update", want: false},
+		{name: "architect document not gated", workerID: "AGT-architect-agent", query: "create an architecture document", want: false},
 		{name: "architect read only skipped", workerID: "AGT-architect-agent", query: "analyze the MCP server architecture and explain if it uses RAG", want: false},
 		{name: "qa read only skipped", workerID: "AGT-qa-agent", query: "explain the current test strategy", want: false},
 		{name: "librarian never gated", workerID: "AGT-runtime-librarian-agent", query: "where is SOUL.md loaded from?", want: false},

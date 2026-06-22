@@ -509,6 +509,25 @@ func (a *CopilotAgent) injectPeerCallArgs(ctx context.Context, args map[string]i
 	}
 }
 
+func (a *CopilotAgent) injectHandoffArgs(ctx context.Context, args map[string]interface{}) {
+	if args == nil {
+		return
+	}
+	args["caller_agent_id"] = a.AgentID
+	args["depth"] = PeerCallDepthFromContext(ctx)
+	if access, ok := WorkContextFromContext(ctx); ok {
+		if current, _ := args["task_id"].(string); strings.TrimSpace(current) == "" {
+			args["task_id"] = access.TaskID
+		}
+		if current, _ := args["work_context_id"].(string); strings.TrimSpace(current) == "" {
+			args["work_context_id"] = access.ID
+		}
+		if current, _ := args["token"].(string); strings.TrimSpace(current) == "" {
+			args["token"] = access.Token
+		}
+	}
+}
+
 func (a *CopilotAgent) injectToolArgs(ctx context.Context, toolName string, args map[string]interface{}) {
 	if args == nil {
 		return
@@ -516,6 +535,8 @@ func (a *CopilotAgent) injectToolArgs(ctx context.Context, toolName string, args
 	switch toolName {
 	case "call_agent":
 		a.injectPeerCallArgs(ctx, args)
+	case "handoff_to_agent", "complete_task":
+		a.injectHandoffArgs(ctx, args)
 	case "agent_context_read", "agent_context_append", "agent_context_search":
 		a.injectWorkContextArgs(ctx, args)
 	}

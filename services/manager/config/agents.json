@@ -16,8 +16,9 @@
       "agent_context_search"
     ],
     "mesh": [
-      "call_agent",
-      "list_agents"
+      "list_agents",
+      "handoff_to_agent",
+      "complete_task"
     ],
     "office": [
       "office_artifact_list",
@@ -118,7 +119,7 @@
         "AGT-research-agent"
       ],
       "maxPeerDepth": 3,
-      "seniorGate": "delivery",
+      "seniorGate": "off",
       "authority": "Frontend code, UI behavior, responsive layout, accessibility, and frontend implementation tradeoffs.",
       "mustNotOwn": ["backend data contracts", "deployment"]
     },
@@ -143,7 +144,7 @@
         "AGT-research-agent"
       ],
       "maxPeerDepth": 3,
-      "seniorGate": "delivery",
+      "seniorGate": "off",
       "authority": "Backend code, API behavior, service boundaries, server data flow, and integration implementation.",
       "mustNotOwn": ["frontend layout", "infrastructure deployment"]
     },
@@ -167,7 +168,7 @@
         "AGT-research-agent"
       ],
       "maxPeerDepth": 3,
-      "seniorGate": "delivery",
+      "seniorGate": "off",
       "authority": "Deployment, Docker, CI/CD, runtime operations, network wiring, and infrastructure safety.",
       "mustNotOwn": ["application feature logic", "UI design"]
     },
@@ -192,7 +193,7 @@
         "AGT-research-agent"
       ],
       "maxPeerDepth": 3,
-      "seniorGate": "delivery",
+      "seniorGate": "off",
       "authority": "Testing strategy, regression coverage, validation evidence, and release confidence.",
       "mustNotOwn": ["implementation", "architecture ownership"]
     },
@@ -216,7 +217,7 @@
         "AGT-research-agent"
       ],
       "maxPeerDepth": 3,
-      "seniorGate": "delivery",
+      "seniorGate": "off",
       "authority": "Database schema, migrations, indexing, query performance, and data integrity.",
       "mustNotOwn": ["API behavior outside persistence", "frontend behavior"]
     },
@@ -243,7 +244,7 @@
         "AGT-senior-dev-agent"
       ],
       "maxPeerDepth": 3,
-      "seniorGate": "delivery",
+      "seniorGate": "off",
       "authority": "Architecture shape, system boundaries, project-level design, and persistent architecture documents.",
       "mustNotOwn": ["final code quality gate", "hands-on implementation by default"]
     },
@@ -340,7 +341,7 @@
         "solo": "Sage Only"
       },
       "modeDescriptions": {
-        "auto": "Sage Auto sends the turn through the manager/orchestrator.",
+        "auto": "Sage Auto sends the turn through the manager router and agent-owned handoff runtime.",
         "solo": "Direct chat with Sage as a persona; worker routing stays off."
       },
       "routable": false,

@@ -436,7 +436,7 @@ func (a *SageOrchestratorAgent) DispatchWorker(
 		mode = "direct"
 	}
 	if opts.SuppressPeerTools {
-		ctx = WithSuppressedTools(ctx, "call_agent", "list_agents")
+		ctx = WithSuppressedTools(ctx, "call_agent", "list_agents", "handoff_to_agent", "complete_task")
 	}
 
 	if opts.EnforceSeniorGate && a.requiresSeniorGateForRequest(workerID, query) {

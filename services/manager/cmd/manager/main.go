@@ -344,6 +344,8 @@ func main() {
 	// ── Error bus ────────────────────────────────────────────────────────────
 	pub := &sageagents.ErrorPublisher{Client: rc}
 	orchestrator.StartErrorSubscriber(ctx, rc)
+	agentHandoffs := newAgentHandoffRuntime(rc, workers, workContexts)
+	agentHandoffs.start(ctx)
 
 	// ── Sage front-of-house (AGT-sage) ───────────────────────────────────────
 	// Optional, gated by SAGE_FRONT_OF_HOUSE_ENABLED. When on, inbound tasks
@@ -411,7 +413,7 @@ func main() {
 				continue
 			}
 			log.Printf("← [%s] cap=%s  content=%.60s...", task.TaskID, task.Capability, task.Content)
-			go handleTask(ctx, rc, orchestrator, sageRunner, acpClient, pub, chatSessions, chatActiveTasks, dispatchSessions, workContexts, task)
+			go handleTask(ctx, rc, orchestrator, sageRunner, acpClient, pub, chatSessions, chatActiveTasks, dispatchSessions, workContexts, agentHandoffs, task)
 		}
 	}()
 
@@ -464,6 +466,7 @@ func main() {
 
 	// /orchestrator/errors — cross-request error memory.
 	registerProviderAuthRoutes(mux, stateDir, codexBridgeURL)
+	registerAgentHandoffRoutes(mux, agentHandoffs)
 	mux.HandleFunc("/orchestrator/errors", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"started_at": orchestrator.ErrorsStartedAt(),
@@ -511,7 +514,7 @@ func main() {
 		}
 		log.Printf("← [%s] (HTTP) cap=%s  content=%.60s...", task.TaskID, task.Capability, task.Content)
 
-		reply := runTask(r.Context(), rc, orchestrator, sageRunner, acpClient, pub, chatSessions, chatActiveTasks, dispatchSessions, workContexts, task)
+		reply := runTask(r.Context(), rc, orchestrator, sageRunner, acpClient, pub, chatSessions, chatActiveTasks, dispatchSessions, workContexts, agentHandoffs, task)
 		writeJSON(w, http.StatusOK, reply)
 	})
 
@@ -1587,7 +1590,7 @@ func filterAllowedMCPTools(agentID string, allowed []string, available map[strin
 		if name == "" {
 			continue
 		}
-		if (name == "call_agent" || name == "list_agents") && (!managerEnvBool("SAGE_AGENT_MESH_ENABLED", true) || !sageagents.AgentCanCallPeers(agentID)) {
+		if isAgentHandoffTool(name) && (!managerEnvBool("SAGE_AGENT_MESH_ENABLED", true) || !sageagents.AgentCanCallPeers(agentID)) {
 			continue
 		}
 		if len(available) > 0 {
@@ -1599,6 +1602,15 @@ func filterAllowedMCPTools(agentID string, allowed []string, available map[strin
 		filtered = append(filtered, name)
 	}
 	return filtered
+}
+
+func isAgentHandoffTool(name string) bool {
+	switch name {
+	case "call_agent", "list_agents", "handoff_to_agent", "complete_task":
+		return true
+	default:
+		return false
+	}
 }
 
 func managerEnvBool(key string, def bool) bool {
@@ -1806,6 +1818,29 @@ func finalizeSageAutoManagerExecution(
 	return final, nil
 }
 
+func finalizeSageAutoAgentOwnedExecution(
+	ctx context.Context,
+	sage *sageagents.SageRunner,
+	task inboundTask,
+	rawResult string,
+	execErr error,
+	tracker *sageagents.HandoffTracker,
+) (string, error) {
+	var capErr *sageagents.RoundCapReachedError
+	if errors.As(execErr, &capErr) {
+		return rawResult, execErr
+	}
+	executionResult := sage.BuildManagerExecutionResult(task.ContextID, task.TaskID, rawResult, execErr, tracker)
+	final, finalErr := sage.CompleteAutoFromManagerResult(ctx, task.ContextID, task.Content, executionResult, tracker)
+	if finalErr != nil {
+		return final, finalErr
+	}
+	if execErr != nil {
+		return final, execErr
+	}
+	return final, nil
+}
+
 // handleTask is the Redis-driven entry point. It runs the same pipeline as
 // /dispatch via runTask, then logs and discards the response (the response
 // is delivered to Sage entirely through sage:events).
@@ -1820,9 +1855,10 @@ func handleTask(
 	chatActiveTasks *chatActiveTaskStore,
 	dispatchSessions sageagents.SessionStore,
 	workContexts *sageagents.WorkContextStore,
+	agentHandoffs *agentHandoffRuntime,
 	task inboundTask,
 ) {
-	runTask(ctx, rc, orch, sage, acp, pub, chatSessions, chatActiveTasks, dispatchSessions, workContexts, task)
+	runTask(ctx, rc, orch, sage, acp, pub, chatSessions, chatActiveTasks, dispatchSessions, workContexts, agentHandoffs, task)
 }
 
 // runTask is the unified orchestration pipeline used by both the Redis
@@ -1840,6 +1876,7 @@ func runTask(
 	chatActiveTasks *chatActiveTaskStore,
 	dispatchSessions sageagents.SessionStore,
 	workContexts *sageagents.WorkContextStore,
+	agentHandoffs *agentHandoffRuntime,
 	task inboundTask,
 ) SageResponse {
 	ctx, unregisterActiveTask := activeTasks.register(ctx, task.TaskID)
@@ -1976,9 +2013,10 @@ func runTask(
 		orchestrationInput = buildDispatchRollingInput(ctx, dispatchSessions, task.ContextID, orchestrationInput)
 	}
 	var (
-		result   string
-		err      error
-		canceled bool
+		result       string
+		err          error
+		canceled     bool
+		lastWorkerID string
 	)
 	switch {
 	case agentMode == sageagents.ChatModeSolo && task.TargetAgentID == sageagents.SageAgentID:
@@ -1992,6 +2030,7 @@ func runTask(
 	case agentMode == sageagents.ChatModeSolo:
 		log.Printf("  Routing [%s] to %s solo", task.TaskID, task.TargetAgentID)
 		sageagents.AppendWorkContextEvent(ctx, "route_decision", "manager", "Task routed to targeted agent solo", "", map[string]interface{}{"agent": task.TargetAgentID, "mode": agentMode})
+		lastWorkerID = task.TargetAgentID
 		result, err = orch.DispatchWorker(ctx, task.TargetAgentID, orchestrationInput, tracker, sageagents.WorkerDispatchOptions{
 			Mode:              sageagents.ChatModeSolo,
 			SuppressPeerTools: true,
@@ -2000,11 +2039,9 @@ func runTask(
 	case agentMode == sageagents.ChatModeLaunch:
 		log.Printf("  Routing [%s] to %s launch", task.TaskID, task.TargetAgentID)
 		sageagents.AppendWorkContextEvent(ctx, "route_decision", "manager", "Task launched from targeted agent", "", map[string]interface{}{"agent": task.TargetAgentID, "mode": agentMode})
-		result, err = orch.DispatchWorker(ctx, task.TargetAgentID, orchestrationInput, tracker, sageagents.WorkerDispatchOptions{
-			Mode:              sageagents.ChatModeLaunch,
-			SuppressPeerTools: false,
-			EnforceSeniorGate: true,
-		})
+		owned, runErr := agentHandoffs.runInitial(ctx, task, workContext, task.TargetAgentID, orchestrationInput, tracker)
+		result, err = owned.Content, runErr
+		lastWorkerID = owned.LastAgent
 	case useSage:
 		log.Printf("  Routing [%s] through AGT-sage (contextID=%s)", task.TaskID, task.ContextID)
 		sageagents.AppendWorkContextEvent(ctx, "route_decision", "manager", "Task routed through Sage front-of-house", "", map[string]interface{}{"agent": sageagents.SageAgentID})
@@ -2012,7 +2049,25 @@ func runTask(
 		if err != nil {
 			break
 		}
-		result, err = runSageAutoManagerExecution(ctx, sage, orch, task, orchestrationInput, tracker)
+		if managerEnvBool("SAGE_AUTO_LEGACY_ORCHESTRATOR", false) {
+			result, err = runSageAutoManagerExecution(ctx, sage, orch, task, orchestrationInput, tracker)
+			lastWorkerID = orch.LastWorker()
+			break
+		}
+		decision := decideInitialRoute(orch.Registry, orchestrationInput)
+		sageagents.AppendWorkContextEvent(ctx, "initial_route", "manager", "Initial router selected task owner", "", map[string]interface{}{
+			"target":           decision.Target,
+			"agent_id":         decision.AgentID,
+			"reason":           decision.Reason,
+			"suggested_skills": decision.SuggestedSkills,
+		})
+		if decision.Target == "sage" {
+			result, err = sage.RunSolo(ctx, task.ContextID, task.Content, tracker)
+			break
+		}
+		owned, runErr := agentHandoffs.runInitial(ctx, task, workContext, decision.AgentID, orchestrationInput, tracker)
+		lastWorkerID = owned.LastAgent
+		result, err = finalizeSageAutoAgentOwnedExecution(ctx, sage, task, owned.Content, runErr, tracker)
 	case agentMode == sageagents.ChatModeAuto && task.Source == "local-chat":
 		err = fmt.Errorf("Sage Auto requires Sage front-of-house to be initialized")
 	default:
@@ -2020,8 +2075,20 @@ func runTask(
 			err = fmt.Errorf("unsupported chat mode %q", agentMode)
 			break
 		}
-		sageagents.AppendWorkContextEvent(ctx, "route_decision", "manager", "Task routed directly to orchestrator", "", map[string]interface{}{"agent": orch.AgentID})
-		result, err = orch.Orchestrate(ctx, orchestrationInput, tracker)
+		decision := decideInitialRoute(orch.Registry, orchestrationInput)
+		if decision.Target == "sage" {
+			err = fmt.Errorf("Sage route selected but Sage front-of-house is not initialized")
+			break
+		}
+		sageagents.AppendWorkContextEvent(ctx, "initial_route", "manager", "Initial router selected task owner", "", map[string]interface{}{
+			"target":           decision.Target,
+			"agent_id":         decision.AgentID,
+			"reason":           decision.Reason,
+			"suggested_skills": decision.SuggestedSkills,
+		})
+		owned, runErr := agentHandoffs.runInitial(ctx, task, workContext, decision.AgentID, orchestrationInput, tracker)
+		result, err = owned.Content, runErr
+		lastWorkerID = owned.LastAgent
 	}
 
 	// Loop while the orchestrator hits its round cap and the human says continue.
@@ -2189,7 +2256,10 @@ finalize:
 			reply.Error = result
 		}
 	} else {
-		log.Printf("  Orchestrate ✓ [%s] (%s) worker=%s replyLen=%d", task.TaskID, oDur, orch.LastWorker(), len(result))
+		if lastWorkerID == "" {
+			lastWorkerID = orch.LastWorker()
+		}
+		log.Printf("  Orchestrate ✓ [%s] (%s) worker=%s replyLen=%d", task.TaskID, oDur, lastWorkerID, len(result))
 		if chatActiveTasks != nil && task.Source == "local-chat" && task.ActiveTaskID != "" {
 			chatActiveTasks.markRunCompleted(ctx, task.ContextID, task.ActiveTaskID, task.TaskID)
 			chatActiveTasks.clearIfTask(ctx, task.ContextID, task.ActiveTaskID)
@@ -2197,7 +2267,7 @@ finalize:
 		if result != "" {
 			publishA2AEventWithWorkContext(rc, a2a.NewArtifactUpdate(task.TaskID, task.ContextID, result), workContextID)
 		}
-		sageagents.AppendWorkContextEvent(ctx, "final_status", "manager", "Task completed", result, map[string]interface{}{"duration_ms": oDur.Milliseconds(), "worker": orch.LastWorker()})
+		sageagents.AppendWorkContextEvent(ctx, "final_status", "manager", "Task completed", result, map[string]interface{}{"duration_ms": oDur.Milliseconds(), "worker": lastWorkerID})
 		publishA2AEventWithWorkContext(rc, a2a.NewCompletedStatus(task.TaskID, task.ContextID), workContextID)
 		if workContexts != nil && workContextID != "" {
 			workContexts.SetStatus(ctx, workContextID, "completed")
@@ -2223,7 +2293,7 @@ finalize:
 	appendAssistantChatTranscript(ctx, chatSessions, task, reply)
 
 	workerModel := orch.ActiveModel()
-	if lw := orch.LastWorker(); lw != "" {
+	if lw := lastWorkerID; lw != "" {
 		if wa, ok := orch.Workers[lw]; ok && wa != nil {
 			workerModel = wa.ActiveModel()
 		}

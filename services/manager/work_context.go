@@ -211,6 +211,7 @@ func BuildWorkContextWorkerPrompt(access WorkContextAccess) string {
 		return ""
 	}
 	return "Agent Work Context is available for this task.\n" +
+		"- task_id: " + access.TaskID + "\n" +
 		"- work_context_id: " + access.ID + "\n" +
 		"- token: " + access.Token + "\n" +
 		"Use agent_context_read or agent_context_search to pull prior agent notes when needed. " +

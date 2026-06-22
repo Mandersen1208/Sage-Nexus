@@ -66,3 +66,32 @@ func TestInjectToolArgs_CallAgentIncludesCallerAndDepth(t *testing.T) {
 		t.Fatalf("depth not injected, got %#v", args["depth"])
 	}
 }
+
+func TestInjectToolArgs_HandoffIncludesTaskContextCallerAndDepth(t *testing.T) {
+	a := &CopilotAgent{BaseAgent: BaseAgent{AgentID: "AGT-caller"}}
+	ctx := WithWorkContext(context.Background(), &WorkContextStore{Client: &redis.Client{}}, WorkContextAccess{
+		ID:     "wc-123",
+		TaskID: "task-123",
+		Token:  "wct-123",
+	})
+	ctx = WithPeerCallDepth(ctx, 1)
+	args := map[string]interface{}{}
+
+	a.injectToolArgs(ctx, "handoff_to_agent", args)
+
+	if got, _ := args["caller_agent_id"].(string); got != "AGT-caller" {
+		t.Fatalf("caller_agent_id not injected, got %q", got)
+	}
+	if got, _ := args["task_id"].(string); got != "task-123" {
+		t.Fatalf("task_id not injected, got %q", got)
+	}
+	if got, _ := args["work_context_id"].(string); got != "wc-123" {
+		t.Fatalf("work_context_id not injected, got %q", got)
+	}
+	if got, _ := args["token"].(string); got != "wct-123" {
+		t.Fatalf("token not injected, got %q", got)
+	}
+	if got, ok := args["depth"].(int); !ok || got != 1 {
+		t.Fatalf("depth not injected, got %#v", args["depth"])
+	}
+}

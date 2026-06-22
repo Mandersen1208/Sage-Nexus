@@ -6,12 +6,12 @@ For current runtime behavior, endpoint inventory, active UI feature state, and k
 
 ## Control Plane
 
-The Go manager owns orchestration. Sage is the front-of-house persona layer, not the orchestrator. The manager receives chat tasks, performs ACP admission, routes work through the agent registry, emits task lifecycle events, persists chat sessions, and exposes the dashboard HTTP API.
+The Go manager owns routing and agent handoff execution. Sage is the front-of-house persona layer, not the router. The manager receives chat tasks, performs ACP admission, picks the first task owner from the agent registry, dispatches agent-owned handoffs through Redis/work context, emits task lifecycle events, persists chat sessions, and exposes the dashboard HTTP API.
 
 Chat mode semantics are intentionally split:
 
 - `Sage Only` is direct persona chat with Sage. Worker routing and flow launch stay off.
-- `Sage Auto` sends the turn through the manager/orchestrator. Sage is the face of the experience, not the routing brain.
+- `Sage Auto` sends the turn through Sage framing, the manager's initial router, and the agent-owned handoff runtime. Sage is the face of the experience, not the routing brain.
 
 ## Services (stable roles)
 
@@ -48,7 +48,7 @@ Adding an agent should remain registry-driven:
 - registry entry
 - tool bundles or explicit tools
 - peer policy
-- senior gate behavior
+- handoff policy
 - targetable modes
 
 Manager Go code should not grow per-agent route maps or static tool exposure switches.

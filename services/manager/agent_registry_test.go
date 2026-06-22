@@ -52,8 +52,8 @@ func TestRegistryControlsToolsPeersAndSeniorGate(t *testing.T) {
 	if !containsString(policy.Allowlist["AGT-office-document-agent"], "AGT-qa-agent") {
 		t.Fatalf("office peer policy missing QA: %v", policy.Allowlist["AGT-office-document-agent"])
 	}
-	if cfg.SeniorGateForAgent("AGT-backend-dev-agent") != "delivery" {
-		t.Fatalf("backend senior gate should be delivery")
+	if cfg.SeniorGateForAgent("AGT-backend-dev-agent") != "off" {
+		t.Fatalf("backend senior gate should be off")
 	}
 	if cfg.SeniorGateForAgent("AGT-office-document-agent") != "off" {
 		t.Fatalf("office senior gate should be off")
@@ -134,19 +134,20 @@ func TestResolveChatSelectionValidatesRegistryPolicy(t *testing.T) {
 
 func TestSuppressedToolsHidePeerDispatch(t *testing.T) {
 	agent := &CopilotAgent{
-		AllowedTools: []string{"call_agent", "list_agents", "agent_context_read"},
+		AllowedTools: []string{"handoff_to_agent", "complete_task", "list_agents", "agent_context_read"},
 		ToolCatalog: []ToolDefinition{
-			toolFixture("call_agent"),
+			toolFixture("handoff_to_agent"),
+			toolFixture("complete_task"),
 			toolFixture("list_agents"),
 			toolFixture("agent_context_read"),
 		},
 	}
-	got := agent.availableTools(WithSuppressedTools(nil, "call_agent", "list_agents"))
+	got := agent.availableTools(WithSuppressedTools(nil, "handoff_to_agent", "complete_task", "list_agents"))
 	names := make([]string, 0, len(got))
 	for _, tool := range got {
 		names = append(names, tool.Function.Name)
 	}
-	if containsString(names, "call_agent") || containsString(names, "list_agents") {
+	if containsString(names, "handoff_to_agent") || containsString(names, "complete_task") || containsString(names, "list_agents") {
 		t.Fatalf("suppressed peer tools were exposed: %v", names)
 	}
 	if !containsString(names, "agent_context_read") {

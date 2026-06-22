@@ -29,7 +29,7 @@ manager-owned copies.
 
 - `acp_client.go`: ACP admission and execution token client.
 - `agent_registry.go`: registry loading, overlay merge, route tool generation,
-  peer policy, senior gate policy.
+  peer/handoff policy.
 - `base_agent.go`: agent identity, ACP registration, MCP connection bootstrap.
 - `chat_modes.go`: chat catalog and solo/auto/launch target validation.
 - `codex_bridge_client.go`: manager-side HTTP client for the host Codex bridge.
@@ -47,8 +47,8 @@ manager-owned copies.
 - `progress.go`: progress events, latency spans, A2A status summaries.
 - `provider_model.go`: provider/model reference parsing and validation.
 - `sage_front_of_house.go`: Sage direct/delegated chat behavior and final voice.
-- `sage_orchestrator_agent.go`: worker routing, deterministic fallback,
-  senior gate, worker dispatch.
+- `sage_orchestrator_agent.go`: legacy worker routing, deterministic fallback,
+  and worker dispatch.
 - `sessions.go`: Redis-backed chat transcript and session metadata stores.
 - `work_context.go`: Redis-backed work context, redaction, token authorization.
 
@@ -102,7 +102,7 @@ manager-owned copies.
    injection.
 3. Split `sage_front_of_house.go` into route classification, delegated
    finalization, and session persistence.
-4. Split `sage_orchestrator_agent.go` into router, worker dispatch, fallback
-   policy, and senior gate.
+4. Split legacy `sage_orchestrator_agent.go` into reusable routing, worker
+   dispatch, and fallback policy pieces if the rollback path remains.
 5. Split dashboard `Chat.tsx` and `SettingsPage.tsx` into focused components
    after backend contracts settle.
